@@ -1,1 +1,1 @@
-# dendrites-vlm2026
+# A vision language model for understanding dendrites growth in lithium ion batteries
