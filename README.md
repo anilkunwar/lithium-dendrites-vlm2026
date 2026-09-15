@@ -1,4 +1,4 @@
-# A vision language model for understanding dendrites growth in lithium ion batteries
+# A vision language model for understanding dendrites growth in lithium-ion batteries
 Contributors:
 
 Hao Tang
