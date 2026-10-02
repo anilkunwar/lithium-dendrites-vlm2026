@@ -31,7 +31,7 @@ PARAM_RANGES = {
     "Noise": (5e-4, 5e-3)
 }
 
-NUM_CASES = 100
+NUM_CASES = 1000
 
 # ====== generate and replace ======
 def generate_case(template_text: str, param_ranges: dict):

@@ -7,12 +7,12 @@
 [Mesh]
   type = GeneratedMesh
   dim = 2
-  nx = 50
-  ny = 50
+  nx = 100
+  ny = 100
   xmin = 0
-  xmax = 50
+  xmax = 100
   ymin = 0
-  ymax = 50
+  ymax = 100
   elem_type = QUAD4
 []
 
@@ -28,21 +28,49 @@
     order = FIRST
     family = LAGRANGE
   [../]
-  
+
   # electric overpotential
   [./pot]
     order = FIRST
     family = LAGRANGE
   [../]
-  
+
 []
 
 [AuxVariables]
-  [./delta_eta]
+  [./bounds_dummy]
+    order = FIRST
+    family = LAGRANGE
   [../]
-  [./delta_c]
+
+  # eta=0.5 interface tip location for stopping criterion
+  [./tip_coordinate]
+    order = FIRST
+    family = LAGRANGE
   [../]
-  [./delta_pot]
+[]
+
+[Bounds]
+  [./c_lower]
+    type = ConstantBounds
+    variable = bounds_dummy
+    bounded_variable = c
+    bound_type = lower
+    bound_value = 0
+  [../]
+  [./eta_lower]
+    type = ConstantBounds
+    variable = bounds_dummy
+    bounded_variable = eta
+    bound_type = lower
+    bound_value = 0
+  [../]
+  [./eta_upper]
+    type = ConstantBounds
+    variable = bounds_dummy
+    bounded_variable = eta
+    bound_type = upper
+    bound_value = 1
   [../]
 []
 
@@ -50,12 +78,12 @@
   [./eta]
     variable = eta
     type = FunctionIC
-    function = 'if(x>=0&x<=5,1,0)'
+    function = 'if(x>=0&x<=10,1,0)'
   [../]
   [./c]
     variable = c	# lithium ion concentration
     type = FunctionIC
-    function = 'if(x>=0&x<=5,0.2,0.8)'
+    function = 'if(x>=0&x<=10,0,1)'
   [../]
 []
 
@@ -76,11 +104,37 @@
     type = DirichletBC
     variable = 'c'
     boundary = 'right'
-    value = 0.8
+    value = 1
   [../]
 []
 
 [Materials]
+  # Conservation diagnostic for the equation actually solved:
+  # d/dt(c + (c_s/c_0)*eta) + div(J) = 0.
+  # J = -Deff*(F_cc*grad(c) + F_ceta*grad(eta)) - Deffe*grad(pot).
+  # Inventories below are normalized integrals over model coordinates.
+  [./li_total_density]
+    type = ParsedMaterial
+    property_name = li_total_density
+    expression = 'c+ft*eta'
+    material_property_names = 'ft'
+    coupled_variables = 'c eta'
+  [../]
+  [./li_flux_c_coefficient]
+    type = ParsedMaterial
+    property_name = li_flux_c_coefficient
+    expression = 'Deff*Fcc'
+    material_property_names = 'Deff Fcc:=D[F,c,c]'
+    coupled_variables = 'c eta'
+  [../]
+  [./li_flux_eta_coefficient]
+    type = ParsedMaterial
+    property_name = li_flux_eta_coefficient
+    expression = 'Deff*Fceta'
+    material_property_names = 'Deff Fceta:=D[F,c,eta]'
+    coupled_variables = 'c eta'
+  [../]
+
 
   [./scale]
     type = GenericConstantMaterial
@@ -123,15 +177,15 @@
     material_property_names = 'ko length_scale energy_scale'
     outputs = exodus
   [../]
-  # h(eta) 
-  [./h]	
+  # h(eta)
+  [./h]
     type = SwitchingFunctionMaterial
     h_order = HIGH
     eta = eta
     outputs = exodus
   [../]
   # g(eta)
-  [./g] 
+  [./g]
     type = BarrierFunctionMaterial
     g_order = SIMPLE
     eta = eta
@@ -165,7 +219,7 @@
     W = 2e3
     outputs = exodus
     derivative_order = 3
-  [../]  
+  [../]
   # BV driving force
   [./Butlervolmer]
     type = DerivativeParsedMaterial
@@ -203,7 +257,7 @@
     outputs = exodus
   [../]
   # conduction for pot
-  [./ElecEff]	
+  [./ElecEff]
     type = DerivativeParsedMaterial
     expression = '(S1o*h+S2o*(1-h))/length_scale'
     coupled_variables = 'eta'
@@ -218,7 +272,7 @@
     material_property_names = 'valency Faraday length_scale c_s'
     outputs = exodus
   [../]
-  
+
 []
 
 [Kernels]
@@ -244,13 +298,13 @@
     diffusivity = Deffe
     args = 'eta c'
   [../]
-  [./cSource] 
+  [./cSource]
   	type = CoupledSusceptibilityTimeDerivative
     variable = c
     v = eta
     f_name = ft
   [../]
-  
+
   # Allen-Cahn Equation
   #
   [./detadt]
@@ -280,10 +334,10 @@
     type = LangevinNoise
     variable = eta
     multiplier = dh/deta
-    amplitude = 1e-3
+    amplitude = $Noise
   [../]
-  
-  # evolution of pot ▽(σ▽φ)
+
+  # evolution of pot
   [./Cond]
     type = MatDiffusion
     variable = pot
@@ -299,43 +353,35 @@
   [../]
 []
 
+
 [AuxKernels]
-  [./deta]
-    type = DeltaUAux
-    variable = delta_eta
-    coupled_variable = eta   
-    execute_on = timestep_end
-  [../]
-  [./dc]
-    type = DeltaUAux
-    variable = delta_c
-    coupled_variable = c    
-    execute_on = timestep_end
-  [../]
-  [./pot]
-    type = DeltaUAux
-    variable = delta_pot
-    coupled_variable = pot    
-    execute_on = timestep_end
+  [./tip_coordinate]
+    type = ParsedAux
+    variable = tip_coordinate
+    coupled_variables = 'eta'
+    use_xyzt = true
+    expression = 'if(eta>=0.5,x,-1)'
+    execute_on = 'INITIAL TIMESTEP_END'
   [../]
 []
 
 [Executioner]
   type = Transient
   solve_type = 'NEWTON'
-  
-  petsc_options_iname = '-ksp_type -pc_type -pc_factor_mat_solver_type'
-  petsc_options_value = 'preonly   lu        mumps'
-  
-  dtmax = 100
+  scheme = implicit-euler
+
+  petsc_options_iname = '-ksp_type -pc_type -pc_factor_mat_solver_type -snes_type'
+  petsc_options_value = 'preonly   lu        mumps                      vinewtonrsls'
+
+  dtmax = 1
   end_time = 5E3
-  
+
   [./TimeStepper]
     type = IterationAdaptiveDT
     dt = 1E-3
     growth_factor = 1.1
   [../]
-  
+
 [./Adaptivity]
    interval = 5
    initial_adaptivity = 4
@@ -356,81 +402,117 @@
 []
 
 [Postprocessors]
-  [./eta_min]
-    type = NodalExtremeValue
-    variable = eta
-    value_type = min
+  # Total lithium inventory:
+  # M_Li = integral(c + ft*eta)dOmega
+  [./li_total]
+    type = ElementIntegralMaterialProperty
+    mat_prop = li_total_density
     execute_on = 'INITIAL TIMESTEP_END'
   [../]
-  [./eta_max]
-    type = NodalExtremeValue
-    variable = eta
-    value_type = max
-    execute_on = 'INITIAL TIMESTEP_END'
+
+  [./li_initial]
+    type = ElementIntegralMaterialProperty
+    mat_prop = li_total_density
+    execute_on = 'INITIAL'
   [../]
-  [./c_min]
-    type = NodalExtremeValue
+
+  # Boundary lithium inflow rate (internal dependencies)
+  [./li_right_out_c]
+    outputs = none
+    type = SideDiffusiveFluxIntegral
     variable = c
-    value_type = min
+    diffusivity = li_flux_c_coefficient
+    boundary = right
     execute_on = 'INITIAL TIMESTEP_END'
   [../]
-  [./c_max]
+
+  [./li_right_out_eta]
+    outputs = none
+    type = SideDiffusiveFluxIntegral
+    variable = eta
+    diffusivity = li_flux_eta_coefficient
+    boundary = right
+    execute_on = 'INITIAL TIMESTEP_END'
+  [../]
+
+  [./li_right_out_electric]
+    outputs = none
+    type = SideDiffusiveFluxIntegral
+    variable = pot
+    diffusivity = Deffe
+    boundary = right
+    execute_on = 'INITIAL TIMESTEP_END'
+  [../]
+
+  [./li_right_in_rate]
+    type = ParsedPostprocessor
+    pp_names = 'li_right_out_c li_right_out_eta li_right_out_electric'
+    expression = '-(li_right_out_c+li_right_out_eta+li_right_out_electric)'
+    execute_on = 'INITIAL TIMESTEP_END'
+  [../]
+
+  [./li_net_in]
+    type = TimeIntegratedPostprocessor
+    value = li_right_in_rate
+    time_integration_scheme = implicit-euler
+    execute_on = 'INITIAL TIMESTEP_END'
+  [../]
+
+  [./li_balance_error]
+    type = ParsedPostprocessor
+    pp_names = 'li_total li_initial li_net_in'
+    expression = 'li_total-li_initial-li_net_in'
+    execute_on = 'INITIAL TIMESTEP_END'
+  [../]
+
+  [./li_balance_error_rel]
+    type = ParsedPostprocessor
+    pp_names = 'li_balance_error li_initial'
+    expression = 'abs(li_balance_error)/max(abs(li_initial),1e-16)'
+    execute_on = 'INITIAL TIMESTEP_END'
+  [../]
+
+  # Dendrite tip tracking
+  [./tip_x_nodal]
     type = NodalExtremeValue
-    variable = c
+    variable = tip_coordinate
     value_type = max
     execute_on = 'INITIAL TIMESTEP_END'
+    force_postaux = true
   [../]
-  [./pot_min]
-    type = NodalExtremeValue
-    variable = pot
-    value_type = min
-    execute_on = 'INITIAL TIMESTEP_END'
-  [../]
-  [./pot_max]
-    type = NodalExtremeValue
-    variable = pot
-    value_type = max
+
+  [./tip_gap_nodal]
+    type = ParsedPostprocessor
+    pp_names = 'tip_x_nodal'
+    expression = '100-tip_x_nodal'
     execute_on = 'INITIAL TIMESTEP_END'
   [../]
 []
 
 [UserObjects]
-  [./eta_min_m]
+  [./stop_at_right]
     type = Terminator
-    expression = 'eta_min >= 1'
+    expression = 'tip_x_nodal >= 0 & tip_gap_nodal <= 10'
     fail_mode = HARD
     error_level = INFO
-    message = 'eta_min_m says this should end'
+    message = 'Nodal eta>=0.5 tip is within 10 units of x=100.'
     execute_on = TIMESTEP_END
-  [../]
-  [./eta_max_m]
-    type = Terminator
-    expression = 'eta_max <= 0'
-    fail_mode = HARD
-    error_level = INFO
-    message = 'eta_max_m says this should end'
-    execute_on = TIMESTEP_END
-  [../]
-  [./c_min_m]
-    type = Terminator
-    expression = 'abs(c_min) >= 1'
-    fail_mode = HARD
-    error_level = INFO
-    message = 'c_min_m says this should end'
-    execute_on = TIMESTEP_END
-  [../]
-  [./c_max_m]
-    type = Terminator
-    expression = 'c_max <= 0'
-    fail_mode = HARD
-    error_level = INFO
-    message = 'c_max_m says this should end'
-    execute_on = TIMESTEP_END
+    execution_order_group = 1
   [../]
 []
 
 [Outputs]
-  exodus = true
-  time_step_interval = 10
-  file_base = results/$CASE/$CASE
+  file_base = results/case_003_physics/case_001
+  # Save every accepted step so field-based checks are possible.
+  [./exodus]
+    type = Exodus
+    time_step_interval = 1
+    execute_on = 'INITIAL TIMESTEP_END FINAL'
+  [../]
+  [./monitor]
+    type = CSV
+    time_step_interval = 1
+    execute_on = 'INITIAL TIMESTEP_END FINAL'
+  [../]
 []
+
