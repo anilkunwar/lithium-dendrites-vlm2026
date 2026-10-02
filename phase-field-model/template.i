@@ -502,8 +502,17 @@
 []
 
 [Outputs]
-  exodus = true
-  time_step_interval = 10
   file_base = results/$CASE/$CASE
+  # Save every accepted step so field-based checks are possible.
+  [./exodus]
+    type = Exodus
+    time_step_interval = 10
+    execute_on = 'INITIAL TIMESTEP_END FINAL'
+  [../]
+  [./monitor]
+    type = CSV
+    time_step_interval = 10
+    execute_on = 'INITIAL TIMESTEP_END FINAL'
+  [../]
 []
 
