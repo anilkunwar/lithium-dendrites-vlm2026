@@ -499,6 +499,16 @@
     execute_on = TIMESTEP_END
     execution_order_group = 1
   [../]
+
+  [./stop_at_left]
+    type = Terminator
+    expression = 'tip_x_nodal <= 5'
+    fail_mode = HARD
+    error_level = INFO
+    message = 'Nodal eta>=0.5 tip has retreated to x<=5, or the solid phase has disappeared.'
+    execute_on = TIMESTEP_END
+    execution_order_group = 1
+  [../]
 []
 
 [Outputs]
