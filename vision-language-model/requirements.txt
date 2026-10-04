@@ -1,0 +1,4 @@
+numpy
+scipy
+matplotlib
+pydantic>=2,<3
