@@ -373,7 +373,7 @@
   petsc_options_iname = '-ksp_type -pc_type -pc_factor_mat_solver_type -snes_type'
   petsc_options_value = 'preonly   lu        mumps                      vinewtonrsls'
 
-  dtmax = 1
+  dtmax = 50
   end_time = 5E3
 
   [./TimeStepper]

@@ -7,9 +7,9 @@
 # ===== Config =====
 INPUT_DIR="generated_inputs"
 LOG_DIR="logs"
-MOOSE_EXEC="/home/xtanghao/MooseProject/newt/newt-opt"
+MOOSE_EXEC="/home/lithium/HaoResearch/li_electrodeposition/li_electrodeposition-opt"
 NPROC_PER_JOB=4
-MAX_PARALLEL=4
+MAX_PARALLEL=6
 
 # =========================
 

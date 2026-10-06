@@ -299,7 +299,7 @@ if __name__ == '__main__':
     grid_size = 256
     save_images = True
     sample_interval = 1
-    end_time = 55
+    end_time = -1
 
     data_root = "../phase-field-model/MooseProject/results/"
     save_root = "data/"
