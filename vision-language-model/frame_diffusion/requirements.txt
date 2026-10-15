@@ -1,0 +1,7 @@
+torch
+diffusers>=0.31
+accelerate
+scikit-image
+scipy
+matplotlib
+tqdm
