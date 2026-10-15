@@ -1,7 +1,11 @@
-torch
-diffusers>=0.31
-accelerate
-scikit-image
-scipy
-matplotlib
-tqdm
+--extra-index-url https://download.pytorch.org/whl/cu118
+torch==2.4.0
+numpy==1.26.4
+scipy==1.13.1
+matplotlib==3.4.3
+scikit-image==0.18.3
+tqdm==4.67.1
+safetensors==0.4.5
+huggingface_hub==0.26.1
+diffusers==0.31.0
+accelerate==1.1.1

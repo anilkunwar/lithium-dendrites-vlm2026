@@ -17,8 +17,13 @@ frame, so they do not fit a 3-channel physical field with multi-frame conditioni
 
 ## Usage
 
-Run from `vision-language-model/`, in the same environment as the SD pipeline
-(torch, diffusers, accelerate, scikit-image):
+Set up the environment (versions pinned to the tested setup; `requirements.txt` holds the same list for pip):
+
+```bash
+conda env create -f frame_diffusion/environment.yml
+```
+
+Run from `vision-language-model/`:
 
 ```bash
 python frame_diffusion/train.py --data data --output runs/fd_k4 --context 4 --max-steps 20000
