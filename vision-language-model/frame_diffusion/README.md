@@ -26,8 +26,14 @@ conda env create -f frame_diffusion/environment.yml
 Run from `vision-language-model/`:
 
 ```bash
-python frame_diffusion/train.py --data data --output runs/fd_k4 --context 4 --max-steps 20000
+python frame_diffusion/train.py --data data --output runs/fd_k4 --context 4
 ```
+
+Training length is chosen from the validation score: every 1000 steps (`--val-every`) the EMA
+model predicts the next frame for 256 fixed held-out windows, and the mean squared error
+(`val_mse`) is recorded. Whenever it reaches a new low, the weights are saved to `model/`. Training stops
+after 10 validations without improvement. `--max-steps` (200k) is only an upper bound.
+The learning rate is constant after warmup, as in the diffusers examples.
 
 ```bash
 python frame_diffusion/test.py --run runs/fd_k4
@@ -52,7 +58,7 @@ Useful `test.py` options:
 
 ## Outputs
 
-`runs/<name>/`: `model/` (EMA weights, `from_pretrained`), `scheduler/`, `run_config.json`
+`runs/<name>/`: `model/` (EMA weights at the lowest val_mse, `from_pretrained`), `scheduler/`, `run_config.json`
 (arguments, normalization statistics, split), `train_log.jsonl`, and `checkpoint-*` (pass to `--resume`).
 
 `runs/<name>/test/<case>/`:

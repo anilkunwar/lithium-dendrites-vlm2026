@@ -32,7 +32,12 @@ def load_case(case_dir, resolution=None):
     files = glob.glob(os.path.join(case_dir, "npy_files", "*.npy"))
     files.sort(key=lambda f: float(os.path.basename(f)[:-4]))
     times = np.array([float(os.path.basename(f)[:-4]) for f in files])
-    frames = np.stack([np.load(f) for f in files]).astype(np.float32)  # (T, H, W, C)
+    arrays = [np.load(f) for f in files]
+    bad = [os.path.basename(f) for f, a in zip(files, arrays)
+           if a.ndim != 3 or a.shape[-1] != len(CHANNELS) or a.shape != arrays[0].shape]
+    if bad:
+        raise ValueError(f"{case_dir}: frames must all be (H, W, {len(CHANNELS)}); bad files: {bad[:5]}")
+    frames = np.stack(arrays).astype(np.float32)  # (T, H, W, C)
     # griddata leaves NaN outside the convex hull; replace with per-frame channel means.
     if np.isnan(frames).any():
         means = np.nanmean(frames, axis=(1, 2), keepdims=True)
@@ -86,10 +91,13 @@ def split(cases, num_context, val_cases=None, train_frac=0.8):
     train, test = {}, {}
     for name, (frames, _) in cases.items():
         T = len(frames)
+        if T <= num_context:
+            print(f"[WARN] skipping {name}: {T} frames, need more than --context {num_context}")
+            continue
         if val_cases:
             (test if name in val_cases else train)[name] = (num_context, T - 1)
         else:
-            cut = max(num_context + 1, int(T * train_frac))
+            cut = min(max(num_context + 1, int(T * train_frac)), T)
             train[name] = (num_context, cut - 1)
             test[name] = (cut, T - 1)
     return train, test

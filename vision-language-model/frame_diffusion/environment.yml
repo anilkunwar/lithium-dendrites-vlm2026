@@ -1,5 +1,5 @@
-# conda env create -f frame_diffusion/environment.yml && conda activate frame-diffusion
-# Versions match the environment the code was tested in (RTX 3090, CUDA 11.8 wheels).
+# conda env create -f frame_diffusion/environment.yml && conda activate pytorch
+# torch 2.7.1+cu128 runs on Blackwell (sm_120, needs driver >= 570) and on RTX 3090 (sm_86).
 name: pytorch
 channels:
   - conda-forge
@@ -7,8 +7,8 @@ dependencies:
   - python=3.9
   - pip
   - pip:
-      - --extra-index-url https://download.pytorch.org/whl/cu118
-      - torch==2.4.0
+      - --extra-index-url https://download.pytorch.org/whl/cu128
+      - torch==2.7.1
       - numpy==1.26.4
       - scipy==1.13.1
       - matplotlib==3.4.3

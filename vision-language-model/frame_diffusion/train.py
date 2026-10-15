@@ -17,13 +17,16 @@ import torch.nn.functional as F
 from accelerate import Accelerator
 from accelerate.utils import set_seed
 from diffusers import DDIMScheduler, DDPMScheduler
-from diffusers.optimization import get_cosine_schedule_with_warmup
+from diffusers.optimization import get_constant_schedule_with_warmup
 from diffusers.training_utils import EMAModel
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from tqdm.auto import tqdm
 
 from data import CHANNELS, FrameWindowDataset, Normalizer, discover_cases, load_case, save_json, split
 from model import FramePredictor, sample_next
+
+VAL_WINDOWS = 256  # fixed, evenly spaced held-out windows used for val_mse
+PATIENCE = 10  # stop after this many validations without a new best val_mse
 
 
 def parse_args():
@@ -37,7 +40,8 @@ def parse_args():
     p.add_argument("--resolution", type=int, default=256)
     p.add_argument("--block-out-channels", type=int, nargs="+", default=[64, 128, 256, 256, 512])
     p.add_argument("--batch-size", type=int, default=8)
-    p.add_argument("--max-steps", type=int, default=20000)
+    p.add_argument("--max-steps", type=int, default=200000,
+                   help="upper bound; training stops earlier once val_mse stops improving")
     p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--warmup-steps", type=int, default=500)
     p.add_argument("--grad-accum", type=int, default=1)
@@ -127,19 +131,27 @@ def main():
 
     loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, drop_last=len(train_ds) >= args.batch_size,
                         num_workers=args.num_workers, persistent_workers=args.num_workers > 0)
-    val_loader = DataLoader(val_ds, batch_size=args.batch_size) if val_ds else None
+    val_loader = None
+    if val_ds:
+        idx = torch.linspace(0, len(val_ds) - 1, min(VAL_WINDOWS, len(val_ds))).long().unique().tolist()
+        val_loader = DataLoader(Subset(val_ds, idx), batch_size=args.batch_size)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-2)
-    lr_scheduler = get_cosine_schedule_with_warmup(optimizer, args.warmup_steps, args.max_steps)
+    lr_scheduler = get_constant_schedule_with_warmup(optimizer, args.warmup_steps)
     model, optimizer, loader, lr_scheduler = accelerator.prepare(model, optimizer, loader, lr_scheduler)
 
-    step = 0
+    step, best = 0, {"val_mse": float("inf"), "step": 0, "bad": 0}
     if args.resume:
         accelerator.load_state(args.resume)
         ema.load_state_dict(torch.load(os.path.join(args.resume, "ema.pt"), map_location="cpu"))
         step = int(args.resume.rstrip("/").split("-")[-1])
+        if os.path.exists(os.path.join(args.resume, "best.json")):
+            with open(os.path.join(args.resume, "best.json")) as f:
+                best = json.load(f)
     ema.to(accelerator.device)
+    model_dir = os.path.join(args.output, "model")
 
     epochs = math.ceil((args.max_steps - step) * args.grad_accum / max(len(loader), 1)) + 1
+    stop = False
     progress = tqdm(total=args.max_steps, initial=step, disable=not accelerator.is_local_main_process)
     model.train()
     for _ in range(epochs):
@@ -178,25 +190,40 @@ def main():
             if val_loader and accelerator.is_main_process and step % args.val_every == 0:
                 logs["val_mse"] = validate(accelerator.unwrap_model(model), ema, sample_scheduler,
                                            val_loader, args.val_steps, accelerator.device)
-                accelerator.print(f"step {step}: val one-step MSE (normalized) = {logs['val_mse']:.5f}")
+                if logs["val_mse"] < best["val_mse"]:
+                    best = {"val_mse": logs["val_mse"], "step": step, "bad": 0}
+                    save_model(accelerator, model, ema, model_dir)
+                else:
+                    best["bad"] += 1
+                accelerator.print(f"step {step}: val_mse {logs['val_mse']:.5f} "
+                                  f"(best {best['val_mse']:.5f} at step {best['step']})")
+                if best["bad"] >= PATIENCE:
+                    accelerator.print(f"val_mse has not improved for {PATIENCE} validations; stopping")
+                    accelerator.set_trigger()
             progress.set_postfix(loss=f"{logs['loss']:.4f}")
             if accelerator.is_main_process and (step % 50 == 0 or "val_mse" in logs):
                 with open(os.path.join(args.output, "train_log.jsonl"), "a") as f:
                     f.write(json.dumps({"step": step, **logs}) + "\n")
 
-            if step % args.save_every == 0 or step == args.max_steps:
+            stop = accelerator.check_trigger() or step >= args.max_steps
+            if step % args.save_every == 0 or stop:
                 accelerator.wait_for_everyone()
                 state_dir = os.path.join(args.output, f"checkpoint-{step}")
                 accelerator.save_state(state_dir)
                 if accelerator.is_main_process:
                     torch.save(ema.state_dict(), os.path.join(state_dir, "ema.pt"))
-                    save_model(accelerator, model, ema, os.path.join(args.output, "model"))
-            if step >= args.max_steps:
+                    save_json(best, os.path.join(state_dir, "best.json"))
+                    if not val_loader:  # nothing to select on: keep the latest weights
+                        save_model(accelerator, model, ema, model_dir)
+            if stop:
                 break
-        if step >= args.max_steps:
+        if stop:
             break
 
-    accelerator.print(f"EMA model saved to {os.path.join(args.output, 'model')}")
+    if val_loader:
+        accelerator.print(f"best EMA model (step {best['step']}, val_mse {best['val_mse']:.5f}) in {model_dir}")
+    else:
+        accelerator.print(f"EMA model saved to {model_dir}")
 
 
 if __name__ == "__main__":
