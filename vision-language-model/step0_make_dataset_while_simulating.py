@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Batch export local, inactive MOOSE Exodus results to PNG only.
+"""Batch export local, inactive MOOSE Exodus results to JPG only.
 
 Dependencies: numpy matplotlib netCDF4. Run on the simulation host.
 Existing destination directories are skipped, regardless of their contents.
@@ -118,7 +118,7 @@ def plot_variable_smooth(
     variable_img_dir = os.path.join(output_dir, var_name)
     os.makedirs(variable_img_dir, exist_ok=True)
     fname = os.path.join(
-        variable_img_dir, f"{var_name}_{frame_index:07d}_t{time:.9g}.png"
+        variable_img_dir, f"{var_name}_{frame_index:07d}_t{time:.9g}.jpg"
     )
     try:
         fig.savefig(fname, dpi=150, bbox_inches='tight', pad_inches=0)
@@ -264,7 +264,7 @@ def export_all_variables(files, output_root, variables, sample_interval, end_tim
             if end_time >= 0 and frame >= end_time:
                 break
     if not count:
-        raise ValueError('No PNG files generated')
+        raise ValueError('No JPG files generated')
     return count
 
 
@@ -315,7 +315,7 @@ def main():
                 load_plotting()
             before = file_signature(files)
             save_root.mkdir(parents=True, exist_ok=True)
-            temporary = Path(tempfile.mkdtemp(prefix='.png-tmp-', dir=save_root))
+            temporary = Path(tempfile.mkdtemp(prefix='.jpg-tmp-', dir=save_root))
             count = export_all_variables(files, temporary, args.variables,
                                          args.sample_interval, args.end_time)
             # Reject results if output changed or the simulation restarted.
@@ -329,7 +329,7 @@ def main():
                 continue
             temporary.rename(destination)
             temporary = None
-            print(f'[DONE] {key}: {count} PNGs -> {destination}')
+            print(f'[DONE] {key}: {count} JPGs -> {destination}')
         except Exception as exc:
             failures += 1
             print(f'[ERROR] {key}: {exc}')
