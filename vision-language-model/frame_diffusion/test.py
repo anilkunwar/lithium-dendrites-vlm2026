@@ -14,6 +14,7 @@ import os
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation, PillowWriter
 import numpy as np
 import torch
 from diffusers import DDIMScheduler
@@ -105,6 +106,31 @@ def plot_curves(times, metrics, path):
     plt.close(fig)
 
 
+def plot_rollout_gif(times, gt, preds, path, fps=4):
+    """Animation with one column per channel: GT on top, prediction below."""
+    fig, axes = plt.subplots(2, len(CHANNELS), figsize=(2.6 * len(CHANNELS), 5.4), squeeze=False)
+    ims = []
+    for c, name in enumerate(CHANNELS):
+        lo, hi = gt[:, c].min(), gt[:, c].max()
+        for r, (arr, kind) in enumerate(((gt, "GT"), (preds, "pred"))):
+            ax = axes[r, c]
+            ims.append(ax.imshow(arr[0, c], origin="lower", cmap="viridis", vmin=lo, vmax=hi))
+            ax.set_xticks([]), ax.set_yticks([])
+            ax.set_title(f"{name} {kind}", fontsize=9)
+    title = fig.suptitle("")
+    fig.tight_layout()
+
+    def draw(k):
+        for c in range(len(CHANNELS)):
+            ims[2 * c].set_data(gt[k, c])
+            ims[2 * c + 1].set_data(preds[k, c])
+        title.set_text(f"frame {k + 1}/{len(times)}   t = {times[k]:.2f}")
+        return ims
+
+    FuncAnimation(fig, draw, frames=len(times)).save(path, writer=PillowWriter(fps=fps))
+    plt.close(fig)
+
+
 @torch.no_grad()
 def rollout(model, scheduler, normalizer, frames, times, start, n, args, generator, device):
     """Predict frames start..start+n-1; frames beyond the data use args.dt spacing."""
@@ -183,6 +209,7 @@ def main():
         save_json(per_frame, os.path.join(out_dir, "metrics.json"))
         plot_comparison(pred_t[:n_gt], gt, mean[:n_gt], os.path.join(out_dir, "comparison.png"))
         plot_curves(pred_t[:n_gt], per_frame, os.path.join(out_dir, "metrics.png"))
+        plot_rollout_gif(pred_t[:n_gt], gt, mean[:n_gt], os.path.join(out_dir, "rollout.gif"))
         summary[name] = {
             "start": start, "num_frames": n, "frames_with_gt": n_gt, "samples": args.samples,
             "mode": "teacher_forcing" if args.teacher_forcing else "autoregressive",

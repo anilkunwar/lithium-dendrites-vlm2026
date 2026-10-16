@@ -61,12 +61,21 @@ Useful `test.py` options:
 `runs/<name>/`: `model/` (EMA weights at the lowest val_mse, `from_pretrained`), `scheduler/`, `run_config.json`
 (arguments, normalization statistics, split), `train_log.jsonl`, and `checkpoint-*` (pass to `--resume`).
 
+Refreshed at every validation during training:
+
+- `train_curves.png`: training loss (with a moving average) and val_mse, with the best step marked.
+  `python frame_diffusion/plots.py runs/<name>` redraws it at any time.
+- `val_samples/step_XXXXXX.png`: 4 fixed validation windows. Columns: last context frame (η), then the
+  ground truth, prediction, and absolute error for each channel (normalized units). Compare steps to see the
+  predictions improve.
+
 `runs/<name>/test/<case>/`:
 
 - `sample_XX/npy_files/<time>.npy`: predicted frames in the same `(H, W, 3)` format as step0
 - `metrics.json`: per frame and channel MSE/PSNR/SSIM, plus tip position (fraction of domain width)
   and area fraction of the deposit attached to the left boundary (`eta >= 0.5`, 4-connectivity)
 - `comparison.png`: ground truth, prediction, and error; `metrics.png`: metric curves over time
+- `rollout.gif`: animation of the rollout, ground truth on top and prediction below for each channel
 
 ## Notes
 

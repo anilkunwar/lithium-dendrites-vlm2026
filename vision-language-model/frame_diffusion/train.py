@@ -12,6 +12,7 @@ import json
 import math
 import os
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from accelerate import Accelerator
@@ -24,9 +25,11 @@ from tqdm.auto import tqdm
 
 from data import CHANNELS, FrameWindowDataset, Normalizer, discover_cases, load_case, save_json, split
 from model import FramePredictor, sample_next
+from plots import plot_train_log, plot_val_samples
 
 VAL_WINDOWS = 256  # fixed, evenly spaced held-out windows used for val_mse
 PATIENCE = 10  # stop after this many validations without a new best val_mse
+SHOW_WINDOWS = 4  # validation windows drawn in val_samples/step_*.png
 
 
 def parse_args():
@@ -70,21 +73,29 @@ def save_model(accelerator, model, ema, out_dir):
 
 
 @torch.no_grad()
-def validate(model, ema, scheduler, loader, steps, device):
-    """One-step-ahead MSE (normalized units) with EMA weights on held-out windows."""
+def validate(model, ema, scheduler, loader, steps, device, show):
+    """One-step-ahead MSE (normalized units) with EMA weights on held-out windows.
+
+    Also returns (last context frame, target, prediction) for the windows at positions `show`.
+    """
     ema.store(model.parameters())
     ema.copy_to(model.parameters())
     model.eval()
     g = torch.Generator(device=device).manual_seed(0)
-    se, n = 0.0, 0
+    se, n, pos, kept = 0.0, 0, 0, []
+    C = model.config.num_channels
     for batch in loader:
         ctx, tgt, gaps = (batch[k].to(device) for k in ("context", "target", "gaps"))
         pred = sample_next(model, scheduler, ctx, gaps, num_steps=steps, generator=g)
         se += F.mse_loss(pred, tgt, reduction="sum").item()
         n += tgt.numel()
+        for j in range(len(tgt)):
+            if pos + j in show:
+                kept.append([x[j].float().cpu().numpy() for x in (ctx[:, -C:], tgt, pred)])
+        pos += len(tgt)
     ema.restore(model.parameters())
     model.train()
-    return se / max(n, 1)
+    return se / max(n, 1), [np.stack(a) for a in zip(*kept)]
 
 
 def main():
@@ -135,6 +146,12 @@ def main():
     if val_ds:
         idx = torch.linspace(0, len(val_ds) - 1, min(VAL_WINDOWS, len(val_ds))).long().unique().tolist()
         val_loader = DataLoader(Subset(val_ds, idx), batch_size=args.batch_size)
+        show = set(np.linspace(0, len(idx) - 1, min(SHOW_WINDOWS, len(idx))).astype(int).tolist())
+        show_labels = []
+        for p in sorted(show):
+            name, i = val_ds.index[idx[p]]
+            show_labels.append(f"{name}\nframe {i}, t={val_ds.cases[name][1][i]:.1f}")
+        os.makedirs(os.path.join(args.output, "val_samples"), exist_ok=True)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-2)
     lr_scheduler = get_constant_schedule_with_warmup(optimizer, args.warmup_steps)
     model, optimizer, loader, lr_scheduler = accelerator.prepare(model, optimizer, loader, lr_scheduler)
@@ -188,8 +205,11 @@ def main():
             logs = {"loss": loss.item(), "lr": lr_scheduler.get_last_lr()[0]}
 
             if val_loader and accelerator.is_main_process and step % args.val_every == 0:
-                logs["val_mse"] = validate(accelerator.unwrap_model(model), ema, sample_scheduler,
-                                           val_loader, args.val_steps, accelerator.device)
+                logs["val_mse"], shown = validate(accelerator.unwrap_model(model), ema, sample_scheduler,
+                                                  val_loader, args.val_steps, accelerator.device, show)
+                plot_val_samples(*shown, show_labels,
+                                 os.path.join(args.output, "val_samples", f"step_{step:06d}.png"),
+                                 f"step {step}: val_mse {logs['val_mse']:.4g} (EMA, DDIM {args.val_steps} steps)")
                 if logs["val_mse"] < best["val_mse"]:
                     best = {"val_mse": logs["val_mse"], "step": step, "bad": 0}
                     save_model(accelerator, model, ema, model_dir)
@@ -204,6 +224,8 @@ def main():
             if accelerator.is_main_process and (step % 50 == 0 or "val_mse" in logs):
                 with open(os.path.join(args.output, "train_log.jsonl"), "a") as f:
                     f.write(json.dumps({"step": step, **logs}) + "\n")
+                if "val_mse" in logs:
+                    plot_train_log(args.output)
 
             stop = accelerator.check_trigger() or step >= args.max_steps
             if step % args.save_every == 0 or stop:
