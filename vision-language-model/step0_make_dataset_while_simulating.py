@@ -212,6 +212,23 @@ def matching_cases(process, cases, data_root):
 def running_cases(cases, data_root, pattern):
     active, unknown = set(), []
     for process in process_snapshot(pattern):
+        # This batch uses generated_inputs/case_N.i -> results/case_N/.
+        # Recognize cases even before their first Exodus file exists.
+        tokens = process[2]
+        input_cases = set()
+        for index, token in enumerate(tokens):
+            value = None
+            if token == '-i' and index + 1 < len(tokens):
+                value = tokens[index + 1]
+            elif token.startswith('-i='):
+                value = token[3:]
+            if value is not None:
+                input_path = Path(value)
+                if input_path.suffix == '.i' and re.fullmatch(r'case_\d+', input_path.stem):
+                    input_cases.add(input_path.stem)
+        if input_cases:
+            active.update(input_cases)
+            continue
         matches = matching_cases(process, cases, data_root)
         if matches:
             active.update(matches)
@@ -304,9 +321,9 @@ def main():
             continue
         temporary = None
         try:
-            active, unknown = running_cases(cases, data_root, pattern)
-            if key in active or unknown:
-                print(f'[SKIP running/uncertain] {key}; unmatched PIDs: {unknown}')
+            active, _ = running_cases(cases, data_root, pattern)
+            if key in active:
+                print(f'[SKIP running] {key}')
                 continue
             if args.dry_run:
                 print(f'[WOULD EXPORT] {key}: {len(files)} Exodus files')
@@ -320,8 +337,8 @@ def main():
                                          args.sample_interval, args.end_time)
             # Reject results if output changed or the simulation restarted.
             fresh = discover_cases(data_root)
-            active, unknown = running_cases(fresh, data_root, pattern)
-            if (key in active or unknown or
+            active, _ = running_cases(fresh, data_root, pattern)
+            if (key in active or
                     before != file_signature(fresh.get(key, []))):
                 raise RuntimeError('Simulation/output changed during extraction; retry later')
             if destination.exists():
