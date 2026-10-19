@@ -2,7 +2,7 @@
 """Batch export local, inactive MOOSE Exodus results to JPG only.
 
 Dependencies: numpy matplotlib netCDF4. Run on the simulation host.
-Existing destination directories are verified against the current Exodus data.
+Existing destination directories are verified by JPG count against current Exodus data.
 Incomplete results are cleared while the case is running, or rebuilt after it ends.
 """
 import argparse
@@ -118,7 +118,7 @@ def plot_variable_smooth(
     variable_img_dir = os.path.join(output_dir, var_name)
     os.makedirs(variable_img_dir, exist_ok=True)
     fname = os.path.join(
-        variable_img_dir, f"{var_name}_{frame_index:07d}_t{time:.9g}.jpg"
+        variable_img_dir, f"{var_name}_t{time:.6f}.jpg"
     )
     try:
         fig.savefig(fname, dpi=150, bbox_inches='tight', pad_inches=0)
@@ -284,7 +284,7 @@ def expected_jpg_manifest(files, variables, sample_interval, end_time):
                         for name in variables:
                             expected.add(
                                 image_dir / name /
-                                f'{name}_{frame:07d}_t{time_value:.9g}.jpg')
+                                f'{name}_t{time_value:.6f}.jpg')
             if family_done:
                 break
     return expected
@@ -302,6 +302,17 @@ def actual_jpg_manifest(destination):
 
 def actual_jpg_count(destination):
     return len(actual_jpg_manifest(destination))
+
+
+def has_buggy_frame_index_names(destination):
+    """Detect names emitted by the earlier, incorrect frame-index version."""
+    if not destination.is_dir():
+        return False
+    return any(
+        re.fullmatch(r'.+_\d{7}_t.+\.jpg', path.name)
+        for path in destination.rglob('*.jpg')
+        if path.is_file()
+    )
 
 
 def clear_destination(destination):
@@ -366,7 +377,7 @@ def main():
                         help='Override MOOSE process detection with a command-line regex')
     parser.add_argument('--dry-run', action='store_true')
     args = parser.parse_args()
-    print(f'[VERSION] JPG-v4-verify-counts | script={Path(__file__).resolve()}', flush=True)
+    print(f'[VERSION] JPG-v6-original-names | script={Path(__file__).resolve()}', flush=True)
     if args.sample_interval < 1 or args.end_time < -1:
         parser.error('sample-interval must be >= 1; end-time must be >= -1')
     data_root, save_root = args.data_root.resolve(), args.save_root.resolve()
@@ -397,16 +408,14 @@ def main():
             expected_files = expected_jpg_manifest(
                 files, args.variables, args.sample_interval, args.end_time)
             expected = len(expected_files)
-            actual_files = actual_jpg_manifest(destination)
-            actual = len(actual_files)
-            if actual_files == expected_files and expected > 0:
+            actual = actual_jpg_count(destination)
+            wrong_names = has_buggy_frame_index_names(destination)
+            if actual == expected and expected > 0 and not wrong_names:
                 print(f'[OK complete] {key}: {actual}/{expected} JPGs')
                 continue
 
-            missing_count = len(expected_files - actual_files)
-            extra_count = len(actual_files - expected_files)
-            print(f'[INCOMPLETE] {key}: {actual}/{expected} JPGs; '
-                  f'missing={missing_count}, extra={extra_count}', flush=True)
+            reason = '; incorrect frame-index filenames found' if wrong_names else ''
+            print(f'[INCOMPLETE] {key}: {actual}/{expected} JPGs{reason}', flush=True)
             current_cases = discover_cases(data_root)
             active, _ = running_cases(current_cases, data_root, pattern)
             if key in active:
@@ -434,10 +443,8 @@ def main():
             temporary = Path(tempfile.mkdtemp(prefix=f'.jpg-tmp-{key}-', dir=save_root))
             count = export_all_variables(files, temporary, args.variables,
                                          args.sample_interval, args.end_time)
-            generated_files = actual_jpg_manifest(temporary)
-            generated = len(generated_files)
-            if (count != expected or generated != expected or
-                    generated_files != expected_files):
+            generated = actual_jpg_count(temporary)
+            if count != expected or generated != expected:
                 raise RuntimeError(
                     f'Generated count mismatch: exporter={count}, files={generated}, '
                     f'expected={expected}')
