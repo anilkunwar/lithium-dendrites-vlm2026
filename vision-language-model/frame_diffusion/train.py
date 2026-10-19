@@ -23,7 +23,8 @@ from diffusers.training_utils import EMAModel
 from torch.utils.data import DataLoader, Subset
 from tqdm.auto import tqdm
 
-from data import CHANNELS, FrameWindowDataset, Normalizer, discover_cases, load_case, save_json, split
+from data import (CHANNELS, FrameWindowDataset, Normalizer, ParamNormalizer, discover_cases, load_case,
+                  load_params, save_json, split)
 from model import FramePredictor, sample_next
 from plots import plot_train_log, plot_val_samples
 
@@ -38,6 +39,8 @@ def parse_args():
     p.add_argument("--cases", nargs="*", help="case names to use (default: all converted cases)")
     p.add_argument("--val-cases", nargs="*", help="held-out cases; default splits each case in time")
     p.add_argument("--train-frac", type=float, default=0.8, help="time split when --val-cases is empty")
+    p.add_argument("--no-params", action="store_true",
+                   help="ignore <case>/params.json (unconditioned baseline for comparison)")
     p.add_argument("--output", default="runs/frame_diffusion")
     p.add_argument("--context", type=int, default=4, help="number of conditioning frames K")
     p.add_argument("--resolution", type=int, default=256)
@@ -85,8 +88,8 @@ def validate(model, ema, scheduler, loader, steps, device, show):
     se, n, pos, kept = 0.0, 0, 0, []
     C = model.config.num_channels
     for batch in loader:
-        ctx, tgt, gaps = (batch[k].to(device) for k in ("context", "target", "gaps"))
-        pred = sample_next(model, scheduler, ctx, gaps, num_steps=steps, generator=g)
+        ctx, tgt, gaps, prm = (batch[k].to(device) for k in ("context", "target", "gaps", "params"))
+        pred = sample_next(model, scheduler, ctx, gaps, num_steps=steps, generator=g, params=prm)
         se += F.mse_loss(pred, tgt, reduction="sum").item()
         n += tgt.numel()
         for j in range(len(tgt)):
@@ -104,7 +107,8 @@ def main():
                               gradient_accumulation_steps=args.grad_accum)
     set_seed(args.seed)
 
-    cases = {n: load_case(d, args.resolution) for n, d in discover_cases(args.data, args.cases).items()}
+    case_dirs = discover_cases(args.data, args.cases)
+    cases = {n: load_case(d, args.resolution) for n, d in case_dirs.items()}
     train_ranges, test_ranges = split(cases, args.context, args.val_cases, args.train_frac)
     train_ranges = {n: r for n, r in train_ranges.items() if r[0] <= r[1]}
     if not train_ranges:
@@ -112,9 +116,18 @@ def main():
     # Statistics from frames seen in training only.
     normalizer = Normalizer.fit([cases[n][0][:b + 1] for n, (_, b) in train_ranges.items()])
 
-    train_ds = FrameWindowDataset(cases, train_ranges, normalizer, args.context, flip_y=not args.no_flip)
     test_ranges = {n: r for n, r in test_ranges.items() if r[0] <= r[1]}
-    val_ds = FrameWindowDataset(cases, test_ranges, normalizer, args.context, flip_y=False) if test_ranges else None
+    param_norm, params = None, None
+    if not args.no_params:
+        names, raw = load_params({n: case_dirs[n] for n in {**train_ranges, **test_ranges}})
+        param_norm = ParamNormalizer.fit(names, [raw[n] for n in train_ranges])
+        params = {n: param_norm.encode(v) for n, v in raw.items()}
+        accelerator.print(f"conditioning on {len(names)} parameters: {names}")
+
+    train_ds = FrameWindowDataset(cases, train_ranges, normalizer, args.context, flip_y=not args.no_flip,
+                                  params=params)
+    val_ds = FrameWindowDataset(cases, test_ranges, normalizer, args.context, flip_y=False,
+                                params=params) if test_ranges else None
     accelerator.print(f"cases={list(cases)} train windows={len(train_ds)} "
                       f"test windows={len(val_ds) if val_ds else 0}")
 
@@ -124,6 +137,7 @@ def main():
             "args": vars(args),
             "channels": list(CHANNELS),
             "normalizer": normalizer.to_dict(),
+            "param_normalizer": param_norm.to_dict() if param_norm else None,
             "train_ranges": train_ranges,
             "test_ranges": test_ranges,
         }, os.path.join(args.output, "run_config.json"))
@@ -132,6 +146,7 @@ def main():
         num_channels=len(CHANNELS), num_context=args.context, sample_size=args.resolution,
         block_out_channels=tuple(args.block_out_channels),
         attention_levels=tuple(i >= len(args.block_out_channels) - 2 for i in range(len(args.block_out_channels))),
+        num_params=len(param_norm.names) if param_norm else 0,
     )
     noise_scheduler = DDPMScheduler(num_train_timesteps=args.train_timesteps, beta_schedule="squaredcos_cap_v2",
                                     prediction_type=args.prediction_type, clip_sample=False)
@@ -173,7 +188,7 @@ def main():
     model.train()
     for _ in range(epochs):
         for batch in loader:
-            ctx, tgt, gaps = batch["context"], batch["target"], batch["gaps"]
+            ctx, tgt, gaps, prm = batch["context"], batch["target"], batch["gaps"], batch["params"]
             if args.context_noise > 0:
                 sigma = torch.rand(ctx.shape[0], 1, 1, 1, device=ctx.device) * args.context_noise
                 ctx = ctx + sigma * torch.randn_like(ctx)
@@ -188,7 +203,7 @@ def main():
                 target = tgt
 
             with accelerator.accumulate(model):
-                pred = model(noisy, t, ctx, gaps)
+                pred = model(noisy, t, ctx, gaps, prm)
                 loss = F.mse_loss(pred.float(), target.float())
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:

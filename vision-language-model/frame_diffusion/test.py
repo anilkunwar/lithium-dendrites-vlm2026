@@ -3,6 +3,7 @@
 
 python frame_diffusion/test.py --run runs/fd_k4
 python frame_diffusion/test.py --run runs/fd_k4 --case case_001 --start 10 --num-frames 20 --samples 4
+python frame_diffusion/test.py --run runs/fd_k4 --case case_066 --t0 150 --num-frames 10 --param POT_LEFT=-0.4
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ from diffusers import DDIMScheduler
 from scipy import ndimage
 from skimage.metrics import structural_similarity
 
-from data import CHANNELS, Normalizer, discover_cases, load_case, log_gaps, save_json
+from data import CHANNELS, Normalizer, ParamNormalizer, discover_cases, load_case, load_params, log_gaps, save_json
 from model import FramePredictor, sample_next
 
 
@@ -31,6 +32,11 @@ def parse_args():
     p.add_argument("--data", help="data root (default: the one used in training)")
     p.add_argument("--case", help="case to test (default: every case with a test range)")
     p.add_argument("--start", type=int, help="index of the first predicted frame (default: test split start)")
+    p.add_argument("--t0", type=float,
+                   help="predict the frames after this time; the context is the K frames at or before t0")
+    p.add_argument("--params-file", help="JSON with all simulation parameters (default: the case's own file)")
+    p.add_argument("--param", action="append", default=[], metavar="NAME=VALUE",
+                   help="override one parameter, e.g. --param POT_LEFT=-0.4 (repeatable)")
     p.add_argument("--num-frames", type=int, help="frames to predict (default: to the end of the data)")
     p.add_argument("--dt", type=float, help="time step for frames beyond the available data")
     p.add_argument("--teacher-forcing", action="store_true",
@@ -132,7 +138,7 @@ def plot_rollout_gif(times, gt, preds, path, fps=4):
 
 
 @torch.no_grad()
-def rollout(model, scheduler, normalizer, frames, times, start, n, args, generator, device):
+def rollout(model, scheduler, normalizer, frames, times, start, n, args, generator, device, params=None):
     """Predict frames start..start+n-1; frames beyond the data use args.dt spacing."""
     K = model.config.num_context
     hist = [normalizer.encode(frames[i]).to(device) for i in range(start - K, start)]
@@ -143,7 +149,7 @@ def rollout(model, scheduler, normalizer, frames, times, start, n, args, generat
         t_next = times[i] if i < len(times) else hist_t[-1] + args.dt
         gaps = log_gaps(np.array(hist_t[-K:] + [t_next]))[None].to(device)
         ctx = torch.cat(hist[-K:])[None]
-        x = sample_next(model, scheduler, ctx, gaps, args.steps, args.eta, generator)[0]
+        x = sample_next(model, scheduler, ctx, gaps, args.steps, args.eta, generator, params=params)[0]
         preds.append(normalizer.decode(x).float().cpu())
         pred_t.append(t_next)
         if args.teacher_forcing and i < len(times):
@@ -166,6 +172,13 @@ def main():
     lo, hi = np.array(cfg["normalizer"]["lo"]), np.array(cfg["normalizer"]["hi"])
     K = model.config.num_context
     out_root = args.output or os.path.join(args.run, "test" + ("_tf" if args.teacher_forcing else ""))
+    param_norm = ParamNormalizer.from_dict(cfg["param_normalizer"]) if cfg.get("param_normalizer") else None
+    overrides = {}
+    for item in args.param:
+        key, _, value = item.partition("=")
+        if not param_norm or key not in param_norm.names:
+            raise ValueError(f"unknown parameter {key!r}; the model uses {param_norm.names if param_norm else 'none'}")
+        overrides[key] = float(value)
 
     data_root = args.data or train_args["data"]
     names = [args.case] if args.case else list(cfg["test_ranges"])
@@ -176,9 +189,27 @@ def main():
     summary = {}
     for name, case_dir in case_dirs.items():
         frames, times = load_case(case_dir, train_args["resolution"])
-        start = args.start if args.start is not None else cfg["test_ranges"].get(name, [K])[0]
+        if args.t0 is not None:
+            start = int(np.searchsorted(times, args.t0, side="right"))
+        else:
+            start = args.start if args.start is not None else cfg["test_ranges"].get(name, [K])[0]
         if start < K:
-            raise ValueError(f"--start must be >= context length {K}")
+            raise ValueError(f"need {K} context frames before the first prediction; "
+                             f"t0/--start leaves only {start} (first times: {np.round(times[:K + 1], 3).tolist()})")
+
+        params, used = None, None
+        if param_norm:
+            if args.params_file:
+                with open(args.params_file) as f:
+                    used = json.load(f)
+            else:
+                keys, values = load_params({name: case_dir})
+                used = dict(zip(keys, values[name].tolist()))
+            used.update(overrides)
+            missing = [k for k in param_norm.names if k not in used]
+            if missing:
+                raise ValueError(f"parameters missing for {name}: {missing}")
+            params = param_norm.encode([used[k] for k in param_norm.names])[None].to(device)
         n = args.num_frames or (len(times) - start)
         if start + n > len(times) and args.dt is None:
             raise ValueError("predicting past the last frame needs --dt")
@@ -189,7 +220,7 @@ def main():
         runs = []
         for s in range(args.samples):
             g = torch.Generator(device=device).manual_seed(args.seed + s)
-            preds, pred_t = rollout(model, scheduler, normalizer, frames, times, start, n, args, g, device)
+            preds, pred_t = rollout(model, scheduler, normalizer, frames, times, start, n, args, g, device, params)
             runs.append(preds)
             sample_dir = os.path.join(out_dir, f"sample_{s:02d}", "npy_files")
             os.makedirs(sample_dir, exist_ok=True)
@@ -198,8 +229,10 @@ def main():
         runs = np.stack(runs)  # (S, n, C, H, W)
         mean = runs.mean(0)
 
+        info = {"start": start, "context_times": times[start - K:start].tolist(), "num_frames": n,
+                "params": used, "params_changed": sorted(overrides) or bool(args.params_file)}
         if n_gt == 0:
-            summary[name] = {"start": start, "num_frames": n, "note": "no ground truth in range"}
+            summary[name] = {**info, "note": "no ground truth in range"}
             continue
         gt = frames[start:start + n_gt].numpy()
         per_frame = [field_metrics(mean[k], gt[k], lo, hi, args.threshold) for k in range(n_gt)]
@@ -211,7 +244,7 @@ def main():
         plot_curves(pred_t[:n_gt], per_frame, os.path.join(out_dir, "metrics.png"))
         plot_rollout_gif(pred_t[:n_gt], gt, mean[:n_gt], os.path.join(out_dir, "rollout.gif"))
         summary[name] = {
-            "start": start, "num_frames": n, "frames_with_gt": n_gt, "samples": args.samples,
+            **info, "frames_with_gt": n_gt, "samples": args.samples,
             "mode": "teacher_forcing" if args.teacher_forcing else "autoregressive",
             **{c: {k: float(np.mean([m[c][k] for m in per_frame])) for k in ("mse", "psnr", "ssim")}
                for c in CHANNELS},

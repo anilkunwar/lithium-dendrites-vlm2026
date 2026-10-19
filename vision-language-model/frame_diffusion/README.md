@@ -9,7 +9,8 @@ standard components:
 - [accelerate](https://github.com/huggingface/accelerate): mixed precision, multiple GPUs, checkpoint resume
 - Conditioning: the context frames are concatenated with the noisy target along the channel
   axis (as in MCVD, Voleti et al. 2022, and SR3). MOOSE uses adaptive time steps, so the log time
-  gaps between frames are embedded and added to the timestep embedding.
+  gaps between frames are embedded and added to the timestep embedding. The 14 sampled simulation
+  parameters (`data/<case>/params.json`, z-scored over the training cases) are embedded the same way.
 
 The model is trained from scratch on the physical fields themselves. Pretrained video models
 (SVD, CogVideoX) work on RGB natural video in a VAE latent space and accept one conditioning
@@ -45,6 +46,24 @@ Train/test split:
 - Otherwise each case is split in time. Windows whose target is in the first `--train-frac`
   (0.8) of the frames are used for training, and the test rolls out over the remaining frames.
   This tests extrapolation to later growth stages.
+
+Both step0 scripts copy `generated_inputs/<case>.json` to `data/<case>/params.json`. `--no-params`
+trains without them; compare the two runs to see how much the parameters help.
+
+Predict the frames after a given time with given parameters:
+
+```bash
+python frame_diffusion/test.py --run runs/fd_k4 --case case_066 --t0 150 --num-frames 10
+```
+
+```bash
+python frame_diffusion/test.py --run runs/fd_k4 --case case_066 --t0 150 --num-frames 10 --param POT_LEFT=-0.4 --output runs/fd_k4/test_pot04
+```
+
+The context is the 4 simulation frames at or before `t0`. The parameters come from the case's own JSON,
+from `--params-file`, and from any `--param NAME=VALUE` overrides; `summary.json` records the values used.
+With changed parameters, the metrics still compare against the original simulation, so they measure the
+difference from it, not accuracy.
 
 Useful `test.py` options:
 

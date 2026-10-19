@@ -12,6 +12,7 @@ import matplotlib.tri as tri
 import netCDF4
 import os
 import re
+import shutil
 from scipy.interpolate import griddata
 
 
@@ -290,6 +291,19 @@ def export_all_variables(
     print(f"[INFO] NPYs -> {npy_dir}")
 
 
+def copy_params(case, inputs_dir, output_root):
+    """Copy the sampled parameters <inputs_dir>/<case>.json to <output_root>/params.json."""
+    src = os.path.join(inputs_dir, f"{case}.json")
+    if not os.path.isfile(src):
+        print(f"[WARN] No parameter file for {case}: {src}")
+        return None
+    os.makedirs(output_root, exist_ok=True)
+    dst = os.path.join(output_root, "params.json")
+    shutil.copy2(src, dst)
+    print(f"[PARAMS] {src} -> {dst}")
+    return dst
+
+
 # ============================================================
 # Entry point
 # ============================================================
@@ -302,6 +316,7 @@ if __name__ == '__main__':
     end_time = -1
 
     data_root = "../phase-field-model/MooseProject/results/"
+    inputs_dir = "../phase-field-model/MooseProject/generated_inputs/"
     save_root = "data/"
     for vn in os.listdir(data_root):
         main_file = glob.glob(os.path.join(data_root, vn, "*.e"))[0]
@@ -313,3 +328,4 @@ if __name__ == '__main__':
             grid_size=grid_size,
             save_images=save_images,
         )
+        copy_params(vn, inputs_dir, os.path.join(save_root, vn))

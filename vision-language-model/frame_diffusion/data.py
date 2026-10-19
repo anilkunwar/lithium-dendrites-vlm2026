@@ -77,6 +77,52 @@ class Normalizer:
         return cls(d["lo"], d["hi"])
 
 
+def load_params(case_dirs):
+    """Sampled simulation parameters from <case>/params.json (copied there by step0).
+
+    case_dirs maps case name to directory. Returns (param_names, {case: float64 array});
+    every case must have the same keys.
+    """
+    values, keys = {}, None
+    missing = [n for n, d in case_dirs.items() if not os.path.isfile(os.path.join(d, "params.json"))]
+    if missing:
+        raise FileNotFoundError(f"no params.json for {missing[:10]}; rerun step0, or train with --no-params")
+    for n, case_dir in case_dirs.items():
+        with open(os.path.join(case_dir, "params.json")) as f:
+            d = json.load(f)
+        if keys is None:
+            keys = list(d)
+        elif set(d) != set(keys):
+            raise ValueError(f"{n}.json has keys {sorted(d)}, expected {sorted(keys)}")
+        values[n] = np.array([d[k] for k in keys], dtype=np.float64)
+    return keys, values
+
+
+class ParamNormalizer:
+    """Z-score of each simulation parameter over the training cases."""
+
+    def __init__(self, names, mean, std):
+        self.names = list(names)
+        self.mean = np.asarray(mean, dtype=np.float64)
+        self.std = np.asarray(std, dtype=np.float64)
+
+    @classmethod
+    def fit(cls, names, value_list):
+        x = np.stack(value_list)
+        std = x.std(axis=0)
+        return cls(names, x.mean(axis=0), np.where(std > 0, std, 1.0))
+
+    def encode(self, values):
+        return torch.as_tensor((np.asarray(values, dtype=np.float64) - self.mean) / self.std, dtype=torch.float32)
+
+    def to_dict(self):
+        return {"names": self.names, "mean": self.mean.tolist(), "std": self.std.tolist()}
+
+    @classmethod
+    def from_dict(cls, d):
+        return cls(d["names"], d["mean"], d["std"])
+
+
 def log_gaps(times):
     """Time gaps between consecutive frames, log-scaled because MOOSE uses adaptive steps."""
     return torch.log1p(torch.as_tensor(np.diff(times), dtype=torch.float32))
@@ -104,10 +150,12 @@ def split(cases, num_context, val_cases=None, train_frac=0.8):
 
 
 class FrameWindowDataset(Dataset):
-    """Samples (K context frames -> next frame) windows with their time gaps."""
+    """Samples (K context frames -> next frame) windows with their time gaps and case parameters."""
 
-    def __init__(self, cases, ranges, normalizer, num_context, flip_y=True):
+    def __init__(self, cases, ranges, normalizer, num_context, flip_y=True, params=None):
         self.cases = {n: (normalizer.encode(f), t) for n, (f, t) in cases.items() if n in ranges}
+        # Normalized parameter vector per case; empty when the model is not parameter-conditioned.
+        self.params = {n: (params[n] if params else torch.zeros(0)) for n in self.cases}
         self.K = num_context
         self.flip_y = flip_y
         self.index = [(n, i) for n, (a, b) in ranges.items() for i in range(a, b + 1)]
@@ -126,6 +174,7 @@ class FrameWindowDataset(Dataset):
             "context": window[:-1].flatten(0, 1),
             "target": window[-1],
             "gaps": log_gaps(times[i - self.K:i + 1]),
+            "params": self.params[name],
         }
 
 
