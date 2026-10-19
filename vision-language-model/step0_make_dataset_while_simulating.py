@@ -4,6 +4,7 @@
 Dependencies: numpy matplotlib netCDF4. Run on the simulation host.
 Existing destination directories are verified by JPG count against current Exodus data.
 Incomplete results are cleared while the case is running, or rebuilt after it ends.
+Complete cases also receive <inputs-dir>/<case>.json as params.json.
 """
 import argparse
 import os
@@ -325,6 +326,22 @@ def clear_destination(destination):
     destination.mkdir(parents=True)
 
 
+def copy_params(key, inputs_dir, destination, dry_run=False):
+    """Copy the sampled parameters <inputs_dir>/<key>.json to <destination>/params.json."""
+    src = inputs_dir / f'{key}.json'
+    dst = destination / 'params.json'
+    if not src.is_file():
+        print(f'[WARN params] {key}: no parameter file {src}')
+        return
+    if dst.is_file() and dst.read_bytes() == src.read_bytes():
+        return
+    if dry_run:
+        print(f'[WOULD COPY params] {src} -> {dst}')
+        return
+    shutil.copy2(src, dst)
+    print(f'[PARAMS] {key}: {src} -> {dst}')
+
+
 def export_all_variables(files, output_root, variables, sample_interval, end_time):
     families = group_exodus_families(files)
     count = 0
@@ -369,6 +386,9 @@ def main():
     parser.add_argument('--data-root', type=Path,
                         default=Path('../phase-field-model/MooseProject/results'))
     parser.add_argument('--save-root', type=Path, default=Path('data'))
+    parser.add_argument('--inputs-dir', type=Path,
+                        default=Path('../phase-field-model/MooseProject/generated_inputs'),
+                        help='Directory with the sampled <case>.json parameter files')
     parser.add_argument('--variables', nargs='+', default=['eta', 'c', 'pot'])
     parser.add_argument('--sample-interval', type=int, default=1)
     parser.add_argument('--end-time', type=int, default=-1,
@@ -381,6 +401,7 @@ def main():
     if args.sample_interval < 1 or args.end_time < -1:
         parser.error('sample-interval must be >= 1; end-time must be >= -1')
     data_root, save_root = args.data_root.resolve(), args.save_root.resolve()
+    inputs_dir = args.inputs_dir.resolve()
     if not data_root.is_dir():
         parser.error(f'Input directory does not exist: {data_root}')
     if data_root == save_root or data_root in save_root.parents or save_root in data_root.parents:
@@ -412,6 +433,7 @@ def main():
             wrong_names = has_buggy_frame_index_names(destination)
             if actual == expected and expected > 0 and not wrong_names:
                 print(f'[OK complete] {key}: {actual}/{expected} JPGs')
+                copy_params(key, inputs_dir, destination, args.dry_run)
                 continue
 
             reason = '; incorrect frame-index filenames found' if wrong_names else ''
@@ -475,6 +497,7 @@ def main():
             temporary.rename(destination)
             temporary = None
             print(f'[DONE rebuilt] {key}: {count}/{expected} JPGs -> {destination}')
+            copy_params(key, inputs_dir, destination)
         except Exception as exc:
             failures += 1
             print(f'[ERROR] {key}: {exc}')
