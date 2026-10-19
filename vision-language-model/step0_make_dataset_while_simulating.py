@@ -2,8 +2,8 @@
 """Batch export local, inactive MOOSE Exodus results to JPG only.
 
 Dependencies: numpy matplotlib netCDF4. Run on the simulation host.
-Existing destination directories are skipped, regardless of their contents.
-Process absence is not proof of successful simulation convergence.
+Existing destination directories are verified against the current Exodus data.
+Incomplete results are cleared while the case is running, or rebuilt after it ends.
 """
 import argparse
 import os
@@ -241,15 +241,83 @@ def file_signature(files):
     return {str(f): (f.stat().st_size, f.stat().st_mtime_ns) for f in files}
 
 
-def export_all_variables(files, output_root, variables, sample_interval, end_time):
+def group_exodus_families(files):
     families = {}
     for path in files:
         family = re.sub(r'-s\d+$', '', str(path))
         families.setdefault(family, []).append(path)
-    count = 0
-    for family, members in sorted(families.items()):
+    for members in families.values():
         members.sort(key=lambda p: int(p.name.rsplit('-s', 1)[1])
                      if re.search(r'-s\d+$', p.name) else -1)
+    return families
+
+
+def expected_jpg_manifest(files, variables, sample_interval, end_time):
+    """Return every relative JPG path export_all_variables should produce."""
+    families = group_exodus_families(files)
+    common_parent = Path(os.path.commonpath([str(p.parent) for p in files]))
+    expected = set()
+    for family, members in sorted(families.items()):
+        image_dir = Path('image_files')
+        if len(families) > 1:
+            relative = Path(family).relative_to(common_parent)
+            image_dir = image_dir / relative.with_suffix('')
+        frame = -1
+        family_done = False
+        for filename in members:
+            with netCDF4.Dataset(filename, 'r') as ds:
+                if 'time_whole' not in ds.variables:
+                    raise ValueError(f'Missing time_whole: {filename}')
+                times = ds.variables['time_whole']
+                if len(times) == 0:
+                    raise ValueError(f'No completed frames: {filename}')
+                available = set(get_variable_names(ds))
+                missing = [name for name in variables if name not in available]
+                if missing:
+                    raise ValueError(f'Missing variables {missing}: {filename}')
+                for time_value in times[:]:
+                    frame += 1
+                    if end_time >= 0 and frame > end_time:
+                        family_done = True
+                        break
+                    if frame % sample_interval == 0:
+                        for name in variables:
+                            expected.add(
+                                image_dir / name /
+                                f'{name}_{frame:07d}_t{time_value:.9g}.jpg')
+            if family_done:
+                break
+    return expected
+
+
+def actual_jpg_manifest(destination):
+    if not destination.is_dir():
+        return set()
+    return {
+        path.relative_to(destination)
+        for path in destination.rglob('*.jpg')
+        if path.is_file() and path.stat().st_size > 0
+    }
+
+
+def actual_jpg_count(destination):
+    return len(actual_jpg_manifest(destination))
+
+
+def clear_destination(destination):
+    """Leave an empty case directory, as requested for incomplete running cases."""
+    if destination.exists():
+        if destination.is_dir():
+            shutil.rmtree(destination)
+        else:
+            destination.unlink()
+    destination.mkdir(parents=True)
+
+
+def export_all_variables(files, output_root, variables, sample_interval, end_time):
+    families = group_exodus_families(files)
+    count = 0
+    for family, members in sorted(families.items()):
         # Separate families so equal variable names and times cannot overwrite.
         relative = Path(family).relative_to(os.path.commonpath(
             [str(p.parent) for p in files]))
@@ -298,6 +366,7 @@ def main():
                         help='Override MOOSE process detection with a command-line regex')
     parser.add_argument('--dry-run', action='store_true')
     args = parser.parse_args()
+    print(f'[VERSION] JPG-v4-verify-counts | script={Path(__file__).resolve()}', flush=True)
     if args.sample_interval < 1 or args.end_time < -1:
         parser.error('sample-interval must be >= 1; end-time must be >= -1')
     data_root, save_root = args.data_root.resolve(), args.save_root.resolve()
@@ -316,37 +385,89 @@ def main():
     failures = 0
     for key, files in sorted(cases.items()):
         destination = save_root / key
-        if destination.exists():
-            print(f'[SKIP existing] {destination}')
-            continue
         temporary = None
         try:
-            active, _ = running_cases(cases, data_root, pattern)
-            if key in active:
-                print(f'[SKIP running] {key}')
-                continue
-            if args.dry_run:
-                print(f'[WOULD EXPORT] {key}: {len(files)} Exodus files')
-                continue
             if netCDF4 is None:
                 load_plotting()
+            # Refresh immediately before checking this case. The batch can run
+            # for hours, so the file list captured at startup is not reliable.
+            files = discover_cases(data_root).get(key, [])
+            if not files:
+                raise RuntimeError(f'No Exodus files remain for {key}')
+            expected_files = expected_jpg_manifest(
+                files, args.variables, args.sample_interval, args.end_time)
+            expected = len(expected_files)
+            actual_files = actual_jpg_manifest(destination)
+            actual = len(actual_files)
+            if actual_files == expected_files and expected > 0:
+                print(f'[OK complete] {key}: {actual}/{expected} JPGs')
+                continue
+
+            missing_count = len(expected_files - actual_files)
+            extra_count = len(actual_files - expected_files)
+            print(f'[INCOMPLETE] {key}: {actual}/{expected} JPGs; '
+                  f'missing={missing_count}, extra={extra_count}', flush=True)
+            current_cases = discover_cases(data_root)
+            active, _ = running_cases(current_cases, data_root, pattern)
+            if key in active:
+                if args.dry_run:
+                    print(f'[WOULD CLEAR running] {destination}')
+                else:
+                    clear_destination(destination)
+                    print(f'[CLEARED running] {key}: {destination}')
+                continue
+            if args.dry_run:
+                print(f'[WOULD REBUILD] {key}: expected {expected} JPGs')
+                continue
+            # Refresh once more after the process check and use exactly this
+            # snapshot for both conversion and final validation.
+            files = discover_cases(data_root).get(key, [])
+            if not files:
+                raise RuntimeError(f'No Exodus files remain for {key}')
+            expected_files = expected_jpg_manifest(
+                files, args.variables, args.sample_interval, args.end_time)
+            expected = len(expected_files)
             before = file_signature(files)
+            print(f'[CHECK before] {key}: no matching running process; '
+                  f'{len(files)} Exodus files; expecting {expected} JPGs', flush=True)
             save_root.mkdir(parents=True, exist_ok=True)
-            temporary = Path(tempfile.mkdtemp(prefix='.jpg-tmp-', dir=save_root))
+            temporary = Path(tempfile.mkdtemp(prefix=f'.jpg-tmp-{key}-', dir=save_root))
             count = export_all_variables(files, temporary, args.variables,
                                          args.sample_interval, args.end_time)
+            generated_files = actual_jpg_manifest(temporary)
+            generated = len(generated_files)
+            if (count != expected or generated != expected or
+                    generated_files != expected_files):
+                raise RuntimeError(
+                    f'Generated count mismatch: exporter={count}, files={generated}, '
+                    f'expected={expected}')
             # Reject results if output changed or the simulation restarted.
             fresh = discover_cases(data_root)
             active, _ = running_cases(fresh, data_root, pattern)
-            if (key in active or
-                    before != file_signature(fresh.get(key, []))):
-                raise RuntimeError('Simulation/output changed during extraction; retry later')
+            after = file_signature(fresh.get(key, []))
+            reasons = []
+            if key in active:
+                reasons.append(f'process check now identifies {key} as running')
+            for path in sorted(after.keys() - before.keys()):
+                reasons.append(f'added Exodus file: {path}')
+            for path in sorted(before.keys() - after.keys()):
+                reasons.append(f'removed Exodus file: {path}')
+            for path in sorted(before.keys() & after.keys()):
+                if before[path] != after[path]:
+                    reasons.append(f'changed Exodus file: {path}; '
+                                   f'(size, mtime_ns) {before[path]} -> {after[path]}')
+            if reasons:
+                raise RuntimeError('Final validation failed: ' + '; '.join(reasons))
+            # Keep the old directory until the replacement has been fully
+            # generated and validated.
             if destination.exists():
-                print(f'[SKIP appeared during export] {destination}')
-                continue
+                if destination.is_dir():
+                    shutil.rmtree(destination)
+                else:
+                    destination.unlink()
             temporary.rename(destination)
             temporary = None
-            print(f'[DONE] {key}: {count} JPGs -> {destination}')
+            print(f'[DONE rebuilt] {key}: {count}/{expected} JPGs -> {destination}')
         except Exception as exc:
             failures += 1
             print(f'[ERROR] {key}: {exc}')
