@@ -5,13 +5,20 @@ Reads data/<case>/image_files/eta/eta_t<time>.jpg (jet colormap, written by step
 colors back to eta, and measures the deposit front attached to the left boundary in every frame:
 
 - amplitude: spread of the front position across rows (95th - 5th percentile), / domain width
-- length ratio: length of the eta = 0.5 contour / domain height (1.0 for a flat front)
+- length ratio: length of the attached deposit's outline / domain height (1.0 for a flat front);
+  detached islands and holes inside the deposit are left out
 
 The last frame decides the class:
   uniform       amplitude < --uniform-amp  and length ratio < --uniform-len
   dendritic     amplitude >= --dendrite-amp or length ratio >= --dendrite-len
   transitional  anything in between (wavy front, not yet dendrites)
 The onset time is the first frame whose front is no longer uniform.
+
+Each case also gets an outcome that separates runs which never had a chance to destabilize:
+  stopped_early  the run ended before --min-time (check the MOOSE log)
+  no_growth      the front moved less than --short-travel of the width, or receded
+  swept          uniform, and the front reached --swept of the width
+  uniform / transitional / dendritic   otherwise, the class above
 
 python step1_classify_morphology.py
 python step1_classify_morphology.py --data data --output data/summary/morphology --every 2
@@ -50,6 +57,10 @@ def parse_args():
     p.add_argument("--dendrite-len", type=float, default=1.50)
     p.add_argument("--short-travel", type=float, default=0.10,
                    help="flag cases whose front moved less than this fraction of the width")
+    p.add_argument("--min-time", type=float, default=1.0, help="runs ending before this time are stopped_early")
+    p.add_argument("--swept", type=float, default=0.85, help="front position counted as reaching the far side")
+    p.add_argument("--suspect-detached", type=float, default=0.05,
+                   help="flag a last frame whose detached deposit exceeds this area fraction")
     return p.parse_args()
 
 
@@ -84,14 +95,19 @@ def front_metrics(eta, threshold):
         return None
     # Rightmost attached deposit pixel in each row; rows without deposit count as 0.
     front = np.where(rows, W - 1 - np.argmax(attached[:, ::-1], axis=1), 0) / (W - 1)
-    contours = measure.find_contours(eta, threshold)
-    length = sum(np.sum(np.hypot(*np.diff(c, axis=0).T)) for c in contours) / H
+    def outline(region):
+        # A light blur removes the pixel staircase, which would otherwise lengthen diagonal edges.
+        field = ndimage.gaussian_filter(region.astype(float), 1.0)
+        return sum(np.sum(np.hypot(*np.diff(c, axis=0).T)) for c in measure.find_contours(field, 0.5)) / H
+
+    length = outline(ndimage.binary_fill_holes(attached))
     return {
         "front_mean": float(front.mean()),
         "front_max": float(front.max()),
         "amplitude": float(np.percentile(front, 95) - np.percentile(front, 5)),
         "roughness": float(front.std()),
         "length_ratio": float(length),
+        "contour_ratio_all": float(outline(mask)),
         "detached_area": float((mask & ~attached).mean()),
     }
 
@@ -132,16 +148,27 @@ def analyze_case(case_dir, lut, a):
         raise ValueError("no deposit attached to the left boundary in any frame")
     last = series[-1]
     onset = next((s for s in series if s["class"] != "uniform"), None)
+    travel = last["front_mean"] - series[0]["front_mean"]
+    if last["time"] < a.min_time:
+        outcome = "stopped_early"
+    elif travel < a.short_travel and last["class"] == "uniform":
+        outcome = "no_growth"
+    elif last["class"] == "uniform" and last["front_mean"] >= a.swept:
+        outcome = "swept"
+    else:
+        outcome = last["class"]
     return {
         "class": last["class"],
+        "outcome": outcome,
+        "suspect": last["detached_area"] > a.suspect_detached,
         "frames": len(frames),
         "final_time": last["time"],
         "onset_time": onset["time"] if onset else None,
-        "front_travel": last["front_mean"] - series[0]["front_mean"],
-        "short_run": (last["front_mean"] - series[0]["front_mean"]) < a.short_travel,
+        "front_travel": travel,
+        "short_run": travel < a.short_travel,
         "non_jet_pixels": bad_color,
         **{k: last[k] for k in ("front_mean", "front_max", "amplitude", "roughness", "length_ratio",
-                                "detached_area")},
+                                "contour_ratio_all", "detached_area")},
         "last_image": frames[-1][1],
         "series": series,
     }
@@ -168,9 +195,10 @@ def plot_montage(results, lut, size, path, cols=10):
         for s in ax.spines.values():
             s.set_visible(True), s.set_edgecolor(COLORS[r["class"]]), s.set_linewidth(3)
         ax.axis("on"), ax.set_xticks([]), ax.set_yticks([])
-        flag = " *" if r["short_run"] else ""
-        ax.set_title(f"{n}{flag}\n{r['class']}  t={r['final_time']:.0f}", fontsize=7, color=COLORS[r["class"]])
-    fig.suptitle("Last eta frame of each case (* = front moved less than --short-travel)", fontsize=10)
+        flag = " !" if r["suspect"] else ""
+        ax.set_title(f"{n}{flag}\n{r['outcome']}  t={r['final_time']:.0f}", fontsize=7, color=COLORS[r["class"]])
+    fig.suptitle("Last eta frame of each case; border = class, title = outcome (! = large detached deposit)",
+                 fontsize=10)
     fig.tight_layout()
     fig.savefig(path, dpi=110)
     plt.close(fig)
@@ -243,16 +271,17 @@ def main():
             params[name] = load_params(d)
             r = results[name]
             onset = f"{r['onset_time']:.1f}" if r["onset_time"] is not None else "-"
-            print(f"{name}: {r['class']:<12} amp={r['amplitude']:.3f} len={r['length_ratio']:.2f} "
-                  f"t_end={r['final_time']:.1f} onset={onset}{'  [short run]' if r['short_run'] else ''}")
+            print(f"{name}: {r['outcome']:<13} amp={r['amplitude']:.3f} len={r['length_ratio']:.2f} "
+                  f"t_end={r['final_time']:.1f} onset={onset}{'  [suspect]' if r['suspect'] else ''}")
         except Exception as exc:
             errors[name] = str(exc)
             print(f"{name}: ERROR {exc}")
     if not results:
         raise SystemExit(f"no case with image_files/eta under {a.data}")
 
-    cols = ["case", "class", "short_run", "frames", "final_time", "onset_time", "front_mean", "front_max",
-            "front_travel", "amplitude", "roughness", "length_ratio", "detached_area", "non_jet_pixels"]
+    cols = ["case", "class", "outcome", "suspect", "short_run", "frames", "final_time", "onset_time",
+            "front_mean", "front_max", "front_travel", "amplitude", "roughness", "length_ratio",
+            "contour_ratio_all", "detached_area", "non_jet_pixels"]
     pnames = sorted({k for p in params.values() for k in p})
     with open(os.path.join(a.output, "morphology.csv"), "w", newline="") as f:
         w = csv.writer(f)
@@ -260,8 +289,12 @@ def main():
         for n, r in sorted(results.items()):
             w.writerow([n] + [r[c] for c in cols[1:]] + [params[n].get(k, "") for k in pnames])
     groups = {c: sorted(n for n, r in results.items() if r["class"] == c) for c in CLASSES}
+    outcomes = ("stopped_early", "no_growth", "swept") + CLASSES
+    by_outcome = {o: sorted(n for n, r in results.items() if r["outcome"] == o) for o in outcomes}
+    suspects = sorted(n for n, r in results.items() if r["suspect"])
     with open(os.path.join(a.output, "morphology.json"), "w") as f:
-        json.dump({"groups": groups, "short_runs": sorted(n for n, r in results.items() if r["short_run"]),
+        json.dump({"groups": groups, "outcomes": by_outcome, "suspect": suspects,
+                   "short_runs": sorted(n for n, r in results.items() if r["short_run"]),
                    "errors": errors, "settings": vars(a),
                    "cases": {n: {k: v for k, v in r.items() if k != "last_image"} for n, r in results.items()}},
                   f, indent=2)
@@ -271,12 +304,11 @@ def main():
     plot_params(results, params, os.path.join(a.output, "params_by_class.png"))
 
     print()
-    for c in CLASSES:
-        print(f"{c} ({len(groups[c])}): {' '.join(groups[c]) or '-'}")
-    short = [n for n in groups["uniform"] if results[n]["short_run"]]
-    if short:
-        print(f"uniform but the front moved less than {a.short_travel:.0%} of the width "
-              f"(the run may be too short): {' '.join(short)}")
+    for o in outcomes:
+        print(f"{o} ({len(by_outcome[o])}): {' '.join(by_outcome[o]) or '-'}")
+    if suspects:
+        print(f"suspect: detached deposit > {a.suspect_detached:.0%} of the domain in the last frame, "
+              f"check the images: {' '.join(suspects)}")
     if errors:
         print(f"errors ({len(errors)}): {' '.join(sorted(errors))}")
     print(f"results in {a.output}")

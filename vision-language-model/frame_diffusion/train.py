@@ -1,22 +1,30 @@
 #!/usr/bin/env python3
 """Train a conditional diffusion model that predicts the next frame from K previous frames.
 
-python frame_diffusion/train.py --data data --output runs/fd_k4
+Each run gets its own directory <output>/<YYYYmmdd-HHMMSS>_k<K>_<params|noparams>, so earlier
+runs are never overwritten. When training ends, test.py runs on the held-out data.
+
+python frame_diffusion/train.py --data data --output runs
+python frame_diffusion/train.py --resume runs/20261020-153012_k4_params/checkpoint-5000
 accelerate launch frame_diffusion/train.py ...   # multi-GPU
 """
 
 from __future__ import annotations
 
 import argparse
+import datetime
+import gc
+import importlib.util
 import json
 import math
 import os
+import traceback
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 from accelerate import Accelerator
-from accelerate.utils import set_seed
+from accelerate.utils import broadcast_object_list, set_seed
 from diffusers import DDIMScheduler, DDPMScheduler
 from diffusers.optimization import get_constant_schedule_with_warmup
 from diffusers.training_utils import EMAModel
@@ -28,6 +36,7 @@ from data import (CHANNELS, FrameWindowDataset, Normalizer, ParamNormalizer, dis
 from model import FramePredictor, sample_next
 from plots import plot_train_log, plot_val_samples
 
+AUTO_TEST_FRAMES = 50  # frames rolled out per held-out case by the automatic test
 VAL_WINDOWS = 256  # fixed, evenly spaced held-out windows used for val_mse
 PATIENCE = 10  # stop after this many validations without a new best val_mse
 SHOW_WINDOWS = 4  # validation windows drawn in val_samples/step_*.png
@@ -41,7 +50,7 @@ def parse_args():
     p.add_argument("--train-frac", type=float, default=0.8, help="time split when --val-cases is empty")
     p.add_argument("--no-params", action="store_true",
                    help="ignore <case>/params.json (unconditioned baseline for comparison)")
-    p.add_argument("--output", default="runs/frame_diffusion")
+    p.add_argument("--output", default="runs", help="parent directory; each run creates a subdirectory")
     p.add_argument("--context", type=int, default=4, help="number of conditioning frames K")
     p.add_argument("--resolution", type=int, default=256)
     p.add_argument("--block-out-channels", type=int, nargs="+", default=[64, 128, 256, 256, 512])
@@ -61,10 +70,18 @@ def parse_args():
     p.add_argument("--val-every", type=int, default=1000)
     p.add_argument("--val-steps", type=int, default=25, help="DDIM steps for validation")
     p.add_argument("--save-every", type=int, default=5000)
-    p.add_argument("--resume", help="accelerate state directory to resume from")
+    p.add_argument("--resume", help="checkpoint directory to resume from; training continues in its run")
     p.add_argument("--num-workers", type=int, default=2)
     p.add_argument("--seed", type=int, default=0)
-    return p.parse_args()
+    args = p.parse_args()
+    if args.resume:
+        # Resume with the settings of the original run; options given now still take precedence.
+        cfg = os.path.join(os.path.dirname(os.path.abspath(args.resume.rstrip("/"))), "run_config.json")
+        with open(cfg) as f:
+            saved = json.load(f)["args"]
+        p.set_defaults(**{k: v for k, v in saved.items() if k not in ("resume", "output")})
+        args = p.parse_args()
+    return args
 
 
 def save_model(accelerator, model, ema, out_dir):
@@ -101,11 +118,37 @@ def validate(model, ema, scheduler, loader, steps, device, show):
     return se / max(n, 1), [np.stack(a) for a in zip(*kept)]
 
 
+def make_run_dir(args, accelerator):
+    """New subdirectory of args.output, or the run that holds the --resume checkpoint."""
+    if args.resume:
+        return os.path.dirname(os.path.abspath(args.resume.rstrip("/")))
+    name = [None]
+    if accelerator.is_main_process:
+        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        base = f"{stamp}_k{args.context}_{'noparams' if args.no_params else 'params'}"
+        name[0], i = base, 2
+        while os.path.exists(os.path.join(args.output, name[0])):
+            name[0], i = f"{base}_{i}", i + 1
+        os.makedirs(os.path.join(args.output, name[0]))
+    broadcast_object_list(name)  # every process writes to the same run
+    return os.path.join(args.output, name[0])
+
+
+def run_test(run_dir):
+    """Autoregressive test of the finished run with test.py's defaults."""
+    spec = importlib.util.spec_from_file_location("fd_test", os.path.join(os.path.dirname(__file__), "test.py"))
+    test = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(test)
+    test.main(["--run", run_dir, "--num-frames", str(AUTO_TEST_FRAMES)])
+
+
 def main():
     args = parse_args()
     accelerator = Accelerator(mixed_precision=args.mixed_precision,
                               gradient_accumulation_steps=args.grad_accum)
     set_seed(args.seed)
+    args.output = make_run_dir(args, accelerator)
+    accelerator.print(f"run directory: {args.output}")
 
     case_dirs = discover_cases(args.data, args.cases)
     cases = {n: load_case(d, args.resolution) for n, d in case_dirs.items()}
@@ -257,10 +300,29 @@ def main():
         if stop:
             break
 
-    if val_loader:
-        accelerator.print(f"best EMA model (step {best['step']}, val_mse {best['val_mse']:.5f}) in {model_dir}")
+    accelerator.wait_for_everyone()
+    if not accelerator.is_main_process:
+        return
+    if not os.path.isdir(model_dir):  # stopped before the first validation
+        save_model(accelerator, model, ema, model_dir)
+    if val_loader and best["step"]:
+        print(f"best EMA model (step {best['step']}, val_mse {best['val_mse']:.5f}) in {model_dir}")
     else:
-        accelerator.print(f"EMA model saved to {model_dir}")
+        print(f"EMA model saved to {model_dir}")
+
+    if not test_ranges:
+        print("no held-out frames; skipping the automatic test")
+        return
+    del model, optimizer, loader, val_loader
+    gc.collect()
+    torch.cuda.empty_cache()
+    print(f"testing: autoregressive rollout of up to {AUTO_TEST_FRAMES} frames per held-out case")
+    try:
+        run_test(args.output)
+    except Exception:
+        traceback.print_exc()
+        print(f"automatic test failed; training results are kept. Rerun with:\n"
+              f"  python frame_diffusion/test.py --run {args.output}")
 
 
 if __name__ == "__main__":

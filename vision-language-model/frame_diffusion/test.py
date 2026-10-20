@@ -26,7 +26,7 @@ from data import CHANNELS, Normalizer, ParamNormalizer, discover_cases, load_cas
 from model import FramePredictor, sample_next
 
 
-def parse_args():
+def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--run", required=True, help="training output directory")
     p.add_argument("--data", help="data root (default: the one used in training)")
@@ -47,7 +47,7 @@ def parse_args():
     p.add_argument("--threshold", type=float, default=0.5, help="eta threshold for the deposit phase")
     p.add_argument("--output", help="default: <run>/test")
     p.add_argument("--seed", type=int, default=0)
-    return p.parse_args()
+    return p.parse_args(argv)
 
 
 def front_metrics(eta, threshold):
@@ -160,8 +160,8 @@ def rollout(model, scheduler, normalizer, frames, times, start, n, args, generat
     return torch.stack(preds).numpy(), np.array(pred_t)
 
 
-def main():
-    args = parse_args()
+def main(argv=None):
+    args = parse_args(argv)
     with open(os.path.join(args.run, "run_config.json")) as f:
         cfg = json.load(f)
     train_args = cfg["args"]
@@ -212,7 +212,10 @@ def main():
             params = param_norm.encode([used[k] for k in param_norm.names])[None].to(device)
         n = args.num_frames or (len(times) - start)
         if start + n > len(times) and args.dt is None:
-            raise ValueError("predicting past the last frame needs --dt")
+            n = len(times) - start  # without --dt, stop at the last simulation frame
+            if n <= 0:
+                print(f"{name}: no frames after the start; skipped (pass --dt to extrapolate)")
+                continue
         n_gt = max(0, min(n, len(times) - start))
         out_dir = os.path.join(out_root, name)
         os.makedirs(out_dir, exist_ok=True)

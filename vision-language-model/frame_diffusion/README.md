@@ -27,7 +27,16 @@ conda env create -f frame_diffusion/environment.yml
 Run from `vision-language-model/`:
 
 ```bash
-python frame_diffusion/train.py --data data --output runs/fd_k4 --context 4
+python frame_diffusion/train.py --data data --output runs --context 4
+```
+
+Each run creates its own directory `runs/<YYYYmmdd-HHMMSS>_k4_params` (`_noparams` with `--no-params`),
+so earlier runs are never overwritten. After training, the best model is tested automatically
+(autoregressive rollout of up to 50 frames per held-out case, written to `<run>/test/`).
+To resume, pass only the checkpoint; the run's saved settings are reused:
+
+```bash
+python frame_diffusion/train.py --resume runs/20261020-153012_k4_params/checkpoint-5000
 ```
 
 Training length is chosen from the validation score: every 1000 steps (`--val-every`) the EMA
@@ -37,7 +46,7 @@ after 10 validations without improvement. `--max-steps` (200k) is only an upper 
 The learning rate is constant after warmup, as in the diffusers examples.
 
 ```bash
-python frame_diffusion/test.py --run runs/fd_k4
+python frame_diffusion/test.py --run runs/<run>
 ```
 
 Train/test split:
@@ -53,11 +62,11 @@ trains without them; compare the two runs to see how much the parameters help.
 Predict the frames after a given time with given parameters:
 
 ```bash
-python frame_diffusion/test.py --run runs/fd_k4 --case case_066 --t0 150 --num-frames 10
+python frame_diffusion/test.py --run runs/<run> --case case_066 --t0 150 --num-frames 10
 ```
 
 ```bash
-python frame_diffusion/test.py --run runs/fd_k4 --case case_066 --t0 150 --num-frames 10 --param POT_LEFT=-0.4 --output runs/fd_k4/test_pot04
+python frame_diffusion/test.py --run runs/<run> --case case_066 --t0 150 --num-frames 10 --param POT_LEFT=-0.4 --output runs/<run>/test_pot04
 ```
 
 The context is the 4 simulation frames at or before `t0`. The parameters come from the case's own JSON,
