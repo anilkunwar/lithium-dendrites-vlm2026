@@ -28,7 +28,6 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib import cm
 from PIL import Image
 from scipy import ndimage
 from scipy.spatial import cKDTree
@@ -56,7 +55,9 @@ def parse_args():
 
 def jet_lookup(levels=64):
     """Table mapping quantized RGB to the jet value of the nearest jet color, plus that color distance."""
-    jet = cm.get_cmap("jet")(np.linspace(0, 1, 1024))[:, :3] * 255
+    # matplotlib.colormaps exists from 3.5; cm.get_cmap was removed in 3.9.
+    cmap = matplotlib.colormaps["jet"] if hasattr(matplotlib, "colormaps") else plt.get_cmap("jet")
+    jet = cmap(np.linspace(0, 1, 1024))[:, :3] * 255
     q = (np.arange(levels) + 0.5) * 256 / levels
     grid = np.stack(np.meshgrid(q, q, q, indexing="ij"), axis=-1).reshape(-1, 3)
     dist, idx = cKDTree(jet).query(grid)
