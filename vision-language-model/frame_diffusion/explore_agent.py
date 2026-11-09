@@ -97,7 +97,7 @@ def parse_args(argv=None):
     p.add_argument("--qwen-model", default="qwen3-vl:8b-instruct")
     p.add_argument("--host", default="http://127.0.0.1:11434")
     p.add_argument("--no-images", action="store_true", help="send tables only (for text-only models)")
-    p.add_argument("--lang", default="Chinese", help="language of Qwen's text fields")
+    p.add_argument("--lang", default="English", help="language of Qwen's text fields")
     p.add_argument("--timeout", type=int, default=600)
     p.add_argument("--output", help="default: <run>/explore/<timestamp>")
     p.add_argument("--seed", type=int, default=0)
@@ -387,9 +387,21 @@ class Session:
         K = self.ctx.K
         self.start = K if a.t0 is None else max(K, int(np.searchsorted(self.times, a.t0, side="right")))
         self.base_params = case_params(self.ctx, a.base_case, case_dir)
-        self.n = a.num_frames or self.trusted_horizon()
-        if self.start + self.n > len(self.times) and not self.ctx.roll.dt:
-            raise ValueError("the rollout goes past the base case data; pass --dt or train with --dt")
+        available = len(self.times) - self.start
+        if a.num_frames:
+            self.n = a.num_frames
+        else:
+            self.n = self.trusted_horizon()
+            if self.n > available and not self.ctx.roll.dt:
+                print(f"[INFO] {a.base_case} has {available} frames after the start; rollout length cut from "
+                      f"{self.n} to {available} (pass --num-frames, or --dt to go beyond the data)")
+                self.n = available
+        if self.n > available and not self.ctx.roll.dt:
+            raise ValueError(f"--num-frames {self.n} goes past the {available} frames of {a.base_case} after the "
+                             f"start; use --num-frames <= {available}, or pass --dt for the spacing beyond the data")
+        if self.n * a.samples * a.steps > 20000:
+            print(f"[WARN] each point needs {self.n} frames x {a.samples} samples x {a.steps} steps = "
+                  f"{self.n * a.samples * a.steps} model evaluations; consider a smaller --num-frames")
         self.points, self.experiments, self.eta, self.moose, self.iteration = [], [], {}, [], 0
 
     def trusted_horizon(self):

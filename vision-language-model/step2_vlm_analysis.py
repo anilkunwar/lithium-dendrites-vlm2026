@@ -36,21 +36,28 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 MORPH_TO_CLASS = {"uniform": "uniform", "wavy": "transitional", "dendritic": "dendritic"}
 
-PROMPT = """你在看一个锂金属电沉积相场模拟的 eta 场（相场序参量）。
-图中从左到右是同一次模拟的 {n} 个时刻，标签 {labels}，时间依次为 {times}（模拟时间单位）。
-每张图：x 向右，y 向上；颜色为 jet 色标，红色 = 金属锂（eta≈1），蓝色 = 电解液（eta≈0）。
-锂层从左边界开始向右生长。注意：每张图的色标是按该帧自身的最小值和最大值拉伸的，
-所以几乎均匀的场也可能显示出明显的条纹或噪点，这类情况属于图像伪影，不是形貌。
+PROMPT = """You are looking at the eta field (phase-field order parameter) of a phase-field simulation of lithium
+metal electrodeposition. The image shows {n} times of the same simulation from left to right, labeled {labels},
+at times {times} (simulation units).
+In each panel x points right and y up; the colors use the jet colormap: red = lithium metal (eta ~ 1),
+blue = electrolyte (eta ~ 0). The lithium layer grows from the left edge toward the right. Note: each panel's
+color scale is stretched to that frame's own minimum and maximum, so a nearly uniform field can still show
+clear stripes or noise; these are image artifacts, not morphology.
 {metrics}
-只根据图像回答下面的问题，严格按给定 JSON 格式输出，文字用中文：
-1. morphology_last：最后一帧中，红蓝界面是 uniform（基本平直）、wavy（有起伏但没有明显突出的指状结构）还是 dendritic（有明显指状或树枝状突出）。
-2. protrusions_visible：最后一帧是否能看到向右伸出的指状突出。
-3. first_unstable_frame：界面第一次明显不再平直的是哪一帧，填标签（如 F2）；如果到最后一帧都是平直的，填 none。
-4. detached_regions_visible：最后一帧是否有与左侧锂层不相连的孤立红色区域。
-5. front_reached_right_edge：最后一帧红色区域是否已经接近或到达右边界。
-6. image_artifacts：列出看到的图像问题（条纹、噪点、整幅几乎单色、色标异常等），没有就给空列表。
-7. evidence：对每一帧写一句你看到了什么，frame 填标签。
-8. summary：两三句话总结这个模拟的形貌演化。只描述能看到的现象，不要推测原因，不要估计数值或速度，不要数枝晶个数。
+Answer the questions below from the image only, strictly in the given JSON format, with text in English:
+1. morphology_last: in the last frame, is the red-blue interface uniform (essentially straight), wavy (undulating
+   but without distinct finger-like protrusions) or dendritic (distinct finger-like or branched protrusions)?
+2. protrusions_visible: are finger-like protrusions pointing to the right visible in the last frame?
+3. first_unstable_frame: the label (e.g. F2) of the first frame in which the interface is clearly no longer
+   straight; none if it stays straight up to the last frame.
+4. detached_regions_visible: does the last frame contain isolated red regions not connected to the lithium
+   layer on the left?
+5. front_reached_right_edge: has the red region in the last frame come close to or reached the right edge?
+6. image_artifacts: list the image problems you see (stripes, noise, an almost single-colored panel, an abnormal
+   color scale, ...); an empty list if there are none.
+7. evidence: one sentence per frame on what you see, with frame set to its label.
+8. summary: two or three sentences summarizing the morphological evolution of this simulation. Describe only
+   visible phenomena; do not speculate about causes, estimate values or speeds, or count dendrites.
 """
 
 
@@ -150,9 +157,10 @@ def ask(args, prompt, image_bytes):
 def metrics_text(info):
     if not info:
         return ""
-    onset = f"{info['onset_time']:.4g}" if info.get("onset_time") is not None else "无"
-    return (f"程序测得的参考数值：最后一帧前沿起伏幅度 {info['amplitude']:.3f}（占域宽比例），"
-            f"界面长度/域高 {info['length_ratio']:.2f}，界面开始不平直的时间 {onset}。\n")
+    onset = f"{info['onset_time']:.4g}" if info.get("onset_time") is not None else "none"
+    return (f"Reference values measured by code: front amplitude in the last frame {info['amplitude']:.3f} "
+            f"(fraction of the domain width), interface length / domain height {info['length_ratio']:.2f}, "
+            f"time at which the interface stops being straight {onset}.\n")
 
 
 def check(report, info, labels, frames, idx, args):
@@ -191,8 +199,8 @@ def analyze_case(name, case_dir, info, params, args):
     with open(os.path.join(out_dir, "input.png"), "wb") as f:
         f.write(image_bytes)
 
-    prompt = PROMPT.format(n=len(idx), labels="、".join(labels),
-                           times="、".join(f"{frames[i][0]:.4g}" for i in idx),
+    prompt = PROMPT.format(n=len(idx), labels=", ".join(labels),
+                           times=", ".join(f"{frames[i][0]:.4g}" for i in idx),
                            metrics=metrics_text(info) if args.with_metrics else "")
     request = {"model": args.model, "host": args.host, "prompt": prompt, "with_metrics": args.with_metrics,
                "frames": [{"label": lab, "index": i, "time": frames[i][0], "path": frames[i][1]}

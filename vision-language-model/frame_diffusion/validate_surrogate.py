@@ -121,7 +121,7 @@ def parse_args(argv=None):
     p.add_argument("--host", default="http://127.0.0.1:11434")
     p.add_argument("--qwen-rows", type=int, default=2, help="surrogate samples shown to Qwen")
     p.add_argument("--panel-frames", type=int, default=5, help="times shown to Qwen")
-    p.add_argument("--lang", default="Chinese", help="language of Qwen's text fields")
+    p.add_argument("--lang", default="English", help="language of Qwen's text fields")
     p.add_argument("--timeout", type=int, default=600)
     p.add_argument("--output", help="default: <run>/validation")
     p.add_argument("--seed", type=int, default=0)
