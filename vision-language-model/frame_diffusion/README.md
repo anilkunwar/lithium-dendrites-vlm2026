@@ -159,3 +159,20 @@ Refreshed at every validation during training:
 - The y-mirror augmentation (`--no-flip` disables it) assumes the boundary conditions are symmetric in y.
 - Normalization uses per-channel min/max over the training frames only. Predictions are clipped to that range.
 - `--context-noise` adds small noise to the context frames during training, which reduces drift in autoregressive rollout.
+
+## Exploring parameters with Qwen
+
+```bash
+python frame_diffusion/explore_agent.py --run runs/<run> --base-case case_005 --axes POT_LEFT L2o --goal-file goals/uniform_growth.json
+```
+
+`explore_agent.py` lets Qwen plan experiments on the surrogate. Each step Qwen sees a table of all evaluated
+points (p = fraction of rollouts meeting the goal, classes, final metrics, onset), the logistic boundary fitted by
+code (with the power-law exponent when both axes are log-scaled) and a phase plot, and answers with one action:
+`grid`, `points`, `refine` (code places points near the boundary), `test_invariance` (is an expression such as
+`L2o*abs(POT_LEFT)/L1o` the controlling quantity? points on lines of constant value, AUC against each single
+parameter), `propose_moose`, or `finish`. Points outside the training range are rejected; the rollout length
+defaults to the trusted horizon from `validate_surrogate.py`. Results go to `<run>/explore/<stamp>_<axes>/`:
+`report.md`, `phase.png`, `session.json`, `moose_candidates.json`, and every request in `iter_XX/`.
+`--resume <dir>` continues a session (with a new `--budget` / `--max-iters` if given). Goal files are in `goals/`;
+`--target-class uniform --min-front 0.3` is a shortcut. Qwen's conclusions are drafts until the MOOSE candidates are run.
