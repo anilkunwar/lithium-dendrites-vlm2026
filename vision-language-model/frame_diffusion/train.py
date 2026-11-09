@@ -5,6 +5,7 @@ Each run gets its own directory <output>/<YYYYmmdd-HHMMSS>_k<K>_<params|noparams
 runs are never overwritten. When training ends, test.py runs on the held-out data.
 
 python frame_diffusion/train.py --data data --output runs
+python frame_diffusion/train.py --data data --output runs --context 1 --dt 5 --param-dropout 0.1
 python frame_diffusion/train.py --resume runs/20261020-153012_k4_params/checkpoint-5000
 accelerate launch frame_diffusion/train.py ...   # multi-GPU
 """
@@ -40,6 +41,8 @@ AUTO_TEST_FRAMES = 50  # frames rolled out per held-out case by the automatic te
 VAL_WINDOWS = 256  # fixed, evenly spaced held-out windows used for val_mse
 PATIENCE = 10  # stop after this many validations without a new best val_mse
 SHOW_WINDOWS = 4  # validation windows drawn in val_samples/step_*.png
+# Parameters sampled over decades; z-scored in log10 when present (see --log-params).
+DEFAULT_LOG_PARAMS = ("fo", "ko", "L1o", "L2o", "Noise", "delta")
 
 
 def parse_args():
@@ -50,6 +53,16 @@ def parse_args():
     p.add_argument("--train-frac", type=float, default=0.8, help="time split when --val-cases is empty")
     p.add_argument("--no-params", action="store_true",
                    help="ignore <case>/params.json (unconditioned baseline for comparison)")
+    p.add_argument("--param-names", nargs="*",
+                   help="parameters to condition on (default: every key of params.json)")
+    p.add_argument("--log-params", nargs="*", default=list(DEFAULT_LOG_PARAMS),
+                   help="parameters z-scored in log10; names absent from --param-names are ignored")
+    p.add_argument("--param-dropout", type=float, default=0.1,
+                   help="probability of dropping the parameters in training (enables --guidance); 0 disables")
+    p.add_argument("--guidance", type=float, default=1.0,
+                   help="classifier-free guidance scale on the parameters for validation and the automatic test")
+    p.add_argument("--dt", type=float,
+                   help="resample every case onto a uniform time grid with this step (default: saved frames)")
     p.add_argument("--output", default="runs", help="parent directory; each run creates a subdirectory")
     p.add_argument("--context", type=int, default=4, help="number of conditioning frames K")
     p.add_argument("--resolution", type=int, default=256)
@@ -93,7 +106,7 @@ def save_model(accelerator, model, ema, out_dir):
 
 
 @torch.no_grad()
-def validate(model, ema, scheduler, loader, steps, device, show):
+def validate(model, ema, scheduler, loader, steps, device, show, guidance=1.0):
     """One-step-ahead MSE (normalized units) with EMA weights on held-out windows.
 
     Also returns (last context frame, target, prediction) for the windows at positions `show`.
@@ -106,7 +119,8 @@ def validate(model, ema, scheduler, loader, steps, device, show):
     C = model.config.num_channels
     for batch in loader:
         ctx, tgt, gaps, prm = (batch[k].to(device) for k in ("context", "target", "gaps", "params"))
-        pred = sample_next(model, scheduler, ctx, gaps, num_steps=steps, generator=g, params=prm)
+        pred = sample_next(model, scheduler, ctx, gaps, num_steps=steps, generator=g,
+                           params=prm if prm.shape[-1] else None, guidance=guidance)
         se += F.mse_loss(pred, tgt, reduction="sum").item()
         n += tgt.numel()
         for j in range(len(tgt)):
@@ -126,6 +140,8 @@ def make_run_dir(args, accelerator):
     if accelerator.is_main_process:
         stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         base = f"{stamp}_k{args.context}_{'noparams' if args.no_params else 'params'}"
+        if args.dt:
+            base += f"_dt{args.dt:g}"
         name[0], i = base, 2
         while os.path.exists(os.path.join(args.output, name[0])):
             name[0], i = f"{base}_{i}", i + 1
@@ -134,12 +150,12 @@ def make_run_dir(args, accelerator):
     return os.path.join(args.output, name[0])
 
 
-def run_test(run_dir):
+def run_test(run_dir, guidance=1.0):
     """Autoregressive test of the finished run with test.py's defaults."""
     spec = importlib.util.spec_from_file_location("fd_test", os.path.join(os.path.dirname(__file__), "test.py"))
     test = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(test)
-    test.main(["--run", run_dir, "--num-frames", str(AUTO_TEST_FRAMES)])
+    test.main(["--run", run_dir, "--num-frames", str(AUTO_TEST_FRAMES), "--guidance", str(guidance)])
 
 
 def main():
@@ -151,7 +167,7 @@ def main():
     accelerator.print(f"run directory: {args.output}")
 
     case_dirs = discover_cases(args.data, args.cases)
-    cases = {n: load_case(d, args.resolution) for n, d in case_dirs.items()}
+    cases = {n: load_case(d, args.resolution, args.dt) for n, d in case_dirs.items()}
     train_ranges, test_ranges = split(cases, args.context, args.val_cases, args.train_frac)
     train_ranges = {n: r for n, r in train_ranges.items() if r[0] <= r[1]}
     if not train_ranges:
@@ -162,10 +178,13 @@ def main():
     test_ranges = {n: r for n, r in test_ranges.items() if r[0] <= r[1]}
     param_norm, params = None, None
     if not args.no_params:
-        names, raw = load_params({n: case_dirs[n] for n in {**train_ranges, **test_ranges}})
-        param_norm = ParamNormalizer.fit(names, [raw[n] for n in train_ranges])
+        names, raw = load_params({n: case_dirs[n] for n in {**train_ranges, **test_ranges}}, args.param_names)
+        param_norm = ParamNormalizer.fit(names, [raw[n] for n in train_ranges], args.log_params)
         params = {n: param_norm.encode(v) for n, v in raw.items()}
-        accelerator.print(f"conditioning on {len(names)} parameters: {names}")
+        accelerator.print(f"conditioning on {len(names)} parameters: {names} (log10: {param_norm.log})")
+    use_dropout = bool(param_norm) and args.param_dropout > 0
+    if args.guidance != 1.0 and not use_dropout:
+        raise ValueError("--guidance needs parameters and --param-dropout > 0")
 
     train_ds = FrameWindowDataset(cases, train_ranges, normalizer, args.context, flip_y=not args.no_flip,
                                   params=params)
@@ -190,6 +209,7 @@ def main():
         block_out_channels=tuple(args.block_out_channels),
         attention_levels=tuple(i >= len(args.block_out_channels) - 2 for i in range(len(args.block_out_channels))),
         num_params=len(param_norm.names) if param_norm else 0,
+        param_dropout=use_dropout,
     )
     noise_scheduler = DDPMScheduler(num_train_timesteps=args.train_timesteps, beta_schedule="squaredcos_cap_v2",
                                     prediction_type=args.prediction_type, clip_sample=False)
@@ -245,8 +265,11 @@ def main():
             else:
                 target = tgt
 
+            # Always pass the mask (possibly all False) so null_param is in the graph for DDP.
+            drop = (torch.rand(tgt.shape[0], device=tgt.device) < args.param_dropout) if use_dropout else None
+
             with accelerator.accumulate(model):
-                pred = model(noisy, t, ctx, gaps, prm)
+                pred = model(noisy, t, ctx, gaps, prm, drop)
                 loss = F.mse_loss(pred.float(), target.float())
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
@@ -264,7 +287,8 @@ def main():
 
             if val_loader and accelerator.is_main_process and step % args.val_every == 0:
                 logs["val_mse"], shown = validate(accelerator.unwrap_model(model), ema, sample_scheduler,
-                                                  val_loader, args.val_steps, accelerator.device, show)
+                                                  val_loader, args.val_steps, accelerator.device, show,
+                                                  args.guidance)
                 plot_val_samples(*shown, show_labels,
                                  os.path.join(args.output, "val_samples", f"step_{step:06d}.png"),
                                  f"step {step}: val_mse {logs['val_mse']:.4g} (EMA, DDIM {args.val_steps} steps)")
@@ -318,7 +342,7 @@ def main():
     torch.cuda.empty_cache()
     print(f"testing: autoregressive rollout of up to {AUTO_TEST_FRAMES} frames per held-out case")
     try:
-        run_test(args.output)
+        run_test(args.output, args.guidance)
     except Exception:
         traceback.print_exc()
         print(f"automatic test failed; training results are kept. Rerun with:\n"

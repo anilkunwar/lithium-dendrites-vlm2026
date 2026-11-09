@@ -3,6 +3,7 @@
 Context frames are concatenated with the noisy target along channels (as in MCVD /
 SR3-style conditioning). The time gaps between frames and the simulation parameters are
 embedded and added to the diffusion-timestep embedding through UNet2DModel's class embedding.
+With param_dropout, a learned null embedding allows classifier-free guidance on the parameters.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ class FramePredictor(ModelMixin, ConfigMixin):
         layers_per_block: int = 2,
         attention_levels: tuple = (False, False, False, True, True),
         num_params: int = 0,
+        param_dropout: bool = False,
     ):
         super().__init__()
         down = tuple("AttnDownBlock2D" if a else "DownBlock2D" for a in attention_levels)
@@ -48,24 +50,45 @@ class FramePredictor(ModelMixin, ConfigMixin):
         self.param_embedding = nn.Sequential(
             nn.Linear(num_params, emb_dim), nn.SiLU(), nn.Linear(emb_dim, emb_dim)
         ) if num_params else None
+        # Learned "no parameters" embedding. Training replaces the parameter embedding by it at
+        # random, so sampling can use classifier-free guidance on the parameters.
+        self.null_param = nn.Parameter(torch.zeros(emb_dim)) if num_params and param_dropout else None
 
-    def forward(self, noisy_target, timestep, context, gaps, params=None):
+    def forward(self, noisy_target, timestep, context, gaps, params=None, drop_params=None):
+        """drop_params: optional (B,) bool; True uses the null embedding instead of the parameters."""
         x = torch.cat([context, noisy_target], dim=1)
         cond = self.gap_embedding(gaps)
         if self.param_embedding is not None:
-            cond = cond + self.param_embedding(params)
+            p = self.param_embedding(params)
+            if drop_params is not None:
+                p = torch.where(drop_params[:, None], self.null_param.to(p.dtype), p)
+            cond = cond + p
         return self.unet(x, timestep, class_labels=cond).sample
 
 
 @torch.no_grad()
 def sample_next(model, scheduler: DDIMScheduler, context, gaps, num_steps=50, eta=0.0, generator=None,
-                params=None):
-    """Draw next frames in normalized space given normalized context (B, K*C, H, W)."""
+                params=None, guidance=1.0):
+    """Draw next frames in normalized space given normalized context (B, K*C, H, W).
+
+    guidance != 1 applies classifier-free guidance on the parameters:
+    out = out_uncond + guidance * (out_cond - out_uncond).
+    """
+    use_cfg = guidance != 1.0 and params is not None
+    if use_cfg and getattr(model, "null_param", None) is None:
+        raise ValueError("guidance != 1 needs a model trained with --param-dropout > 0")
     C, H = model.config.num_channels, model.config.sample_size
-    x = torch.randn((context.shape[0], C, H, H), generator=generator, device=context.device,
-                    dtype=context.dtype)
+    B = context.shape[0]
+    x = torch.randn((B, C, H, H), generator=generator, device=context.device, dtype=context.dtype)
+    if use_cfg:
+        drop = torch.arange(2 * B, device=context.device) >= B  # first half conditioned, second not
+        context2, gaps2, params2 = (torch.cat([a, a]) for a in (context, gaps, params))
     scheduler.set_timesteps(num_steps, device=context.device)
     for t in scheduler.timesteps:
-        out = model(x, t, context, gaps, params)
+        if use_cfg:
+            cond, uncond = model(torch.cat([x, x]), t, context2, gaps2, params2, drop).chunk(2)
+            out = uncond + guidance * (cond - uncond)
+        else:
+            out = model(x, t, context, gaps, params)
         x = scheduler.step(out, t, x, eta=eta, generator=generator).prev_sample
     return x.clamp(-1, 1)

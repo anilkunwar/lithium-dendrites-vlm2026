@@ -9,8 +9,9 @@ standard components:
 - [accelerate](https://github.com/huggingface/accelerate): mixed precision, multiple GPUs, checkpoint resume
 - Conditioning: the context frames are concatenated with the noisy target along the channel
   axis (as in MCVD, Voleti et al. 2022, and SR3). MOOSE uses adaptive time steps, so the log time
-  gaps between frames are embedded and added to the timestep embedding. The 14 sampled simulation
-  parameters (`data/<case>/params.json`, z-scored over the training cases) are embedded the same way.
+  gaps between frames are embedded and added to the timestep embedding. The sampled simulation
+  parameters (`data/<case>/params.json`, z-scored over the training cases, in log10 for parameters sampled
+  over decades) are embedded the same way, with an optional null embedding for classifier-free guidance.
 
 The model is trained from scratch on the physical fields themselves. Pretrained video models
 (SVD, CogVideoX) work on RGB natural video in a VAE latent space and accept one conditioning
@@ -73,6 +74,51 @@ The context is the 4 simulation frames at or before `t0`. The parameters come fr
 from `--params-file`, and from any `--param NAME=VALUE` overrides; `summary.json` records the values used.
 With changed parameters, the metrics still compare against the original simulation, so they measure the
 difference from it, not accuracy.
+
+### From parameters and one frame
+
+To generate the frames after a given frame for a given set of parameters, train with one context frame on a
+uniform time grid and with parameter dropout (the defaults `--param-dropout 0.1` and log10 scaling of
+`fo ko L1o L2o Noise delta` apply whenever parameters are used):
+
+```bash
+python frame_diffusion/train.py --data data --output runs --context 1 --dt 5
+```
+
+- `--dt 5` interpolates every case linearly onto t0, t0+5, ... (MOOSE saves at adaptive steps, about 6.5
+  apart for case_001), so each predicted frame is 5 time units after the previous one. `test.py` uses the
+  same grid.
+- `--param-names POT_LEFT L1o L2o ko Noise` conditions on a subset of the keys in `params.json`.
+- `--param-dropout` replaces the parameters with a learned null embedding in 10% of the training samples.
+  Sampling with `--guidance w` (w > 1) then strengthens the effect of the parameters
+  (classifier-free guidance); `--guidance 1` is plain conditional sampling.
+
+```bash
+python frame_diffusion/test.py --run runs/<run> --init-frames data/case_001/npy_files/0.000000.npy \
+    --params-file my_params.json --num-frames 20 --samples 4 --guidance 2 --name trial_01
+```
+
+`--init-frames` takes K `(H, W, 3)` npy files (oldest first) instead of a case; there is no ground truth, so
+the outputs are `sample_XX/npy_files`, `prediction.png` (ensemble mean and std), `front.json` (tip position and
+area fraction per frame and sample), and `summary.json`. `my_params.json` holds the conditioning parameters by
+name (a case's `params.json` works); `--param NAME=VALUE` overrides single values.
+
+### Validating the surrogate (with Qwen)
+
+```bash
+python frame_diffusion/validate_surrogate.py --run runs/<run> --samples 8
+```
+
+The simulations are noisy, so `validate_surrogate.py` judges the model statistically. For every test case it draws
+`--samples` rollouts and compares step1's morphology metrics with the MOOSE frames. Code decides pass/fail for:
+final-frame class agreement, error relative to the MOOSE seed-to-seed spread (needs cases that differ only in the
+seed), interval coverage, eta bounds, Li inventory, and (with `--sweep POT_LEFT`) the direction of a parameter's
+effect. It also reports the trusted rollout horizon. Then Qwen (Ollama, `--qwen-model`) compares MOOSE and samples
+side by side (its answers are checked against the metrics), takes a blind test (which row is the simulation?), and
+writes a verdict whose cited evidence keys and overall rating are checked against the computed criteria.
+Results go to `<run>/validation/`: `report.md`, `summary.json`, `summary.png`, `cases/`, `qwen/`.
+`--no-qwen` skips Qwen; `--qwen-only` reruns only the Qwen part on saved results. Qwen's verdict is a draft:
+check `qwen/reading_checks.json` first, which shows how often its reading of the images matched the metrics.
 
 Useful `test.py` options:
 

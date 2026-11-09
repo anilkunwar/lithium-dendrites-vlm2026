@@ -27,8 +27,11 @@ def discover_cases(data_root, names=None):
     return cases
 
 
-def load_case(case_dir, resolution=None):
-    """Return frames (T, C, H, W) float32 and times (T,) sorted by time."""
+def load_case(case_dir, resolution=None, dt=None):
+    """Return frames (T, C, H, W) float32 and times (T,) sorted by time.
+
+    With dt, the frames are linearly interpolated onto the uniform grid t0, t0 + dt, ...
+    """
     files = glob.glob(os.path.join(case_dir, "npy_files", "*.npy"))
     files.sort(key=lambda f: float(os.path.basename(f)[:-4]))
     times = np.array([float(os.path.basename(f)[:-4]) for f in files])
@@ -37,6 +40,11 @@ def load_case(case_dir, resolution=None):
            if a.ndim != 3 or a.shape[-1] != len(CHANNELS) or a.shape != arrays[0].shape]
     if bad:
         raise ValueError(f"{case_dir}: frames must all be (H, W, {len(CHANNELS)}); bad files: {bad[:5]}")
+    return resample_uniform(frames_to_tensor(arrays, resolution), times, dt)
+
+
+def frames_to_tensor(arrays, resolution=None):
+    """List of (H, W, C) arrays -> (T, C, H, W) float32 tensor, NaN filled, resized to resolution."""
     frames = np.stack(arrays).astype(np.float32)  # (T, H, W, C)
     # griddata leaves NaN outside the convex hull; replace with per-frame channel means.
     if np.isnan(frames).any():
@@ -46,7 +54,23 @@ def load_case(case_dir, resolution=None):
     if resolution and frames.shape[-1] != resolution:
         frames = F.interpolate(frames, size=(resolution, resolution), mode="bilinear",
                                antialias=True, align_corners=False)
-    return frames, times
+    return frames
+
+
+def resample_uniform(frames, times, dt=None):
+    """Linear interpolation in time onto t0, t0 + dt, ..., up to the last frame (no extrapolation).
+
+    MOOSE saves frames at adaptive steps; a uniform grid gives "the next n frames" a fixed
+    meaning. Interpolation smooths structures that change a lot between two saved frames.
+    """
+    if not dt or len(times) < 2:
+        return frames, times
+    grid = np.arange(times[0], times[-1] + 1e-9 * dt, dt)
+    j = np.clip(np.searchsorted(times, grid, side="right"), 1, len(times) - 1)
+    t0, t1 = times[j - 1], times[j]
+    w = torch.as_tensor(np.clip((grid - t0) / np.maximum(t1 - t0, 1e-12), 0, 1),
+                        dtype=torch.float32).view(-1, 1, 1, 1)
+    return (1 - w) * frames[j - 1] + w * frames[j], grid
 
 
 class Normalizer:
@@ -77,13 +101,14 @@ class Normalizer:
         return cls(d["lo"], d["hi"])
 
 
-def load_params(case_dirs):
+def load_params(case_dirs, names=None):
     """Sampled simulation parameters from <case>/params.json (copied there by step0).
 
-    case_dirs maps case name to directory. Returns (param_names, {case: float64 array});
-    every case must have the same keys.
+    case_dirs maps case name to directory. Returns (param_names, {case: float64 array}).
+    Without names, every case must have the same keys; with names, only those are read
+    (other keys, e.g. a seed, are ignored).
     """
-    values, keys = {}, None
+    values, keys = {}, list(names) if names else None
     missing = [n for n, d in case_dirs.items() if not os.path.isfile(os.path.join(d, "params.json"))]
     if missing:
         raise FileNotFoundError(f"no params.json for {missing[:10]}; rerun step0, or train with --no-params")
@@ -92,6 +117,10 @@ def load_params(case_dirs):
             d = json.load(f)
         if keys is None:
             keys = list(d)
+        if names:
+            absent = [k for k in keys if k not in d]
+            if absent:
+                raise ValueError(f"{n}/params.json lacks {absent}")
         elif set(d) != set(keys):
             raise ValueError(f"{n}.json has keys {sorted(d)}, expected {sorted(keys)}")
         values[n] = np.array([d[k] for k in keys], dtype=np.float64)
@@ -99,28 +128,42 @@ def load_params(case_dirs):
 
 
 class ParamNormalizer:
-    """Z-score of each simulation parameter over the training cases."""
+    """Z-score of each simulation parameter over the training cases.
 
-    def __init__(self, names, mean, std):
+    Parameters in `log` (sampled over decades, e.g. ko) are z-scored in log10.
+    """
+
+    def __init__(self, names, mean, std, log=()):
         self.names = list(names)
         self.mean = np.asarray(mean, dtype=np.float64)
         self.std = np.asarray(std, dtype=np.float64)
+        self.log = [n for n in self.names if n in set(log)]
+        self._log_mask = np.array([n in self.log for n in self.names], dtype=bool)
+
+    def transform(self, values):
+        x = np.array(values, dtype=np.float64)
+        if self._log_mask.any():
+            v = x[..., self._log_mask]
+            if (v <= 0).any():
+                raise ValueError(f"log-scaled parameters {self.log} must be positive")
+            x[..., self._log_mask] = np.log10(v)
+        return x
 
     @classmethod
-    def fit(cls, names, value_list):
-        x = np.stack(value_list)
+    def fit(cls, names, value_list, log=()):
+        x = cls(names, 0.0, 1.0, log).transform(np.stack(value_list))
         std = x.std(axis=0)
-        return cls(names, x.mean(axis=0), np.where(std > 0, std, 1.0))
+        return cls(names, x.mean(axis=0), np.where(std > 0, std, 1.0), log)
 
     def encode(self, values):
-        return torch.as_tensor((np.asarray(values, dtype=np.float64) - self.mean) / self.std, dtype=torch.float32)
+        return torch.as_tensor((self.transform(values) - self.mean) / self.std, dtype=torch.float32)
 
     def to_dict(self):
-        return {"names": self.names, "mean": self.mean.tolist(), "std": self.std.tolist()}
+        return {"names": self.names, "mean": self.mean.tolist(), "std": self.std.tolist(), "log": self.log}
 
     @classmethod
     def from_dict(cls, d):
-        return cls(d["names"], d["mean"], d["std"])
+        return cls(d["names"], d["mean"], d["std"], d.get("log", ()))
 
 
 def log_gaps(times):

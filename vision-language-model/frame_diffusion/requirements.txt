@@ -9,3 +9,4 @@ safetensors==0.4.5
 huggingface_hub==0.26.1
 diffusers==0.31.0
 accelerate==1.1.1
+pydantic>=2,<3  # validate_surrogate.py (Qwen answers)
