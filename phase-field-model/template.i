@@ -1,12 +1,35 @@
+# hao tang Oct 2025
+#
+# Li electrodeposition phase-field model (eta = 1 Li metal, eta = 0 electrolyte).
+# Model units: length um, time ms, energy eV. c is the Li+ concentration
+# normalized by c_0; pot is the electric potential in V.
+#
+# Placeholders: $POT_LEFT $Noise $kappa (J/m) $W (J/m^3) $CASE
+# ($kappa and $W are derived from sigma and delta by generate_moose_simulation_files.py)
+#
+# ---------------------------------------------------------------------------
+# Concentration equation (derived from the free energy, not ideal Nernst-Planck)
+#   Total free energy density: F(c,eta) = h*fs(c) + (1-h)*fl(c) + W*g(eta)   [J/m^3]
+#   Electrochemical potential per mol Li+: mu_e = (1/c_0) dF/dc + n*Faraday*pot
+#   Flux (mol/m^2/s): J = -(D*C/RT) grad(mu_e), C = c_0*c
+#   => dc/dt + (c_s/c_0) deta/dt = div[ M grad(dF/dc) + (D*c*n*Faraday/RT) grad(pot) ]
+#      with M = D*c/(RT*c_0).
+#   With fl = Al*(c-1)^2, chemical diffusivity in the liquid = D*c*2*Al/(c_0*RT).
+#
+# Interface (double well W*g, g = eta^2(1-eta)^2, gradient energy kappa/2|grad eta|^2)
+#   sigma = sqrt(2*W*kappa)/6,  delta(10-90%) = 2.2*sqrt(2*kappa/W)
+#   sigma, delta given => kappa = 3*sigma*delta/2.2,  W = 13.2*sigma/delta
+#   (sigma = 0.5 J/m^2, delta = 2.5 um: kappa = 1.70e-6 J/m, W = 2.64e6 J/m^3)
+# ---------------------------------------------------------------------------
+
 [GlobalParams]
   seed = 12345
 []
 
 [Mesh]
+  # fixed mesh, dx = 0.5 um
   type = GeneratedMesh
   dim = 2
-  # 0.5 um elements, no adaptivity: the interface (0.1 < eta < 0.9) spans >= 5 elements
-  # for ko >= 1.5e-6 J/m (benchmarked; generate_moose_simulation_files.py uses ko >= 2e-6).
   nx = 200
   ny = 200
   xmin = 0
@@ -29,12 +52,11 @@
     family = LAGRANGE
   [../]
 
-  # electric overpotential
+  # electric potential
   [./pot]
     order = FIRST
     family = LAGRANGE
   [../]
-
 []
 
 [AuxVariables]
@@ -43,19 +65,8 @@
     family = LAGRANGE
   [../]
 
-  # eta=0.5 interface tip location for stopping criterion
+  # eta>=0.5 interface location for the stopping criterion
   [./tip_coordinate]
-    order = FIRST
-    family = LAGRANGE
-  [../]
-
-  # Interface diagnostics: indicator of 0.1 < eta < 0.9, and x of electrolyte nodes (eta < 0.5)
-  # whose minimum is the deepest point of the front.
-  [./in_interface]
-    order = CONSTANT
-    family = MONOMIAL
-  [../]
-  [./trough_coordinate]
     order = FIRST
     family = LAGRANGE
   [../]
@@ -90,38 +101,18 @@
     bound_type = upper
     bound_value = 1
   [../]
-  # pot stays between the electrode potential and the electrolyte potential (with a margin);
-  # unbounded Newton updates of pot overflow the Butler-Volmer exponentials.
-  [./pot_lower]
-    type = ConstantBounds
-    variable = bounds_dummy
-    bounded_variable = pot
-    bound_type = lower
-    bound_value = ${fparse $POT_LEFT - 0.1}
-  [../]
-  [./pot_upper]
-    type = ConstantBounds
-    variable = bounds_dummy
-    bounded_variable = pot
-    bound_type = upper
-    bound_value = 0.1
-  [../]
 []
 
 [ICs]
-  # Equilibrium (tanh) interface at x = 10 instead of a step. A step relaxes by moving eta on
-  # the electrode side, where c ~ 0; the c >= 0 bound then clips the deficit and creates Li.
-  # eta = 0.5*(1-tanh(x/(2*l))) with l = sqrt(ko/(2*W)) = 1e6*sqrt(ko/4.448e6) um (W = 2.224e6 J/m^3);
-  # its 0.1-0.9 width is 4.39*l.
   [./eta]
     variable = eta
     type = FunctionIC
-    function = '0.5*(1-tanh((x-10)/(2e6*sqrt($ko/4.448e6))))'
+    function = 'if(x>=0&x<=10,1,0)'
   [../]
   [./c]
-    variable = c	# lithium ion concentration
+    variable = c    # lithium ion concentration
     type = FunctionIC
-    function = '0.5*(1+tanh((x-10)/(2e6*sqrt($ko/4.448e6))))'
+    function = 'if(x>=0&x<=10,0,1)'
   [../]
 []
 
@@ -138,7 +129,7 @@
     boundary = 'right'
     value = 0
   [../]
-  [./right_comp]	# connected to the electrolyte
+  [./right_comp]    # connected to the electrolyte
     type = DirichletBC
     variable = 'c'
     boundary = 'right'
@@ -147,65 +138,65 @@
 []
 
 [Materials]
-  # Lithium density c + (c_s/c_0)*eta for the balance check
-  [./li_total_density]
-    type = ParsedMaterial
-    property_name = li_total_density
-    expression = 'c+ft*eta'
-    material_property_names = 'ft'
-    coupled_variables = 'c eta'
-  [../]
-
-
   [./scale]
     type = GenericConstantMaterial
     prop_names = 'length_scale energy_scale time_scale'
-    prop_values = '1e6 6.24150943e18 1'
+    prop_values = '1e6 6.24150943e18 1e3'
   [../]
   [./constants]
     type = GenericConstantMaterial
     prop_names  = 'c_s c_0 valency molar_vol Faraday RT alpha'
-    prop_values = '7.64e4 1e3 1 2.2e-5 96485 2494.2 0.5'
+    prop_values = '7.69e4 1e3 1 2.2e-5 96485 2494.2 0.5'
   [../]
+  # De, Dl: Li+ diffusivity in electrode / electrolyte (m^2/s)
+  # S1o, S2o: conductivity of Li metal / electrolyte (S/m)
   [./system_constants]
     type = GenericConstantMaterial
-    # Meo, Mso: mobilities D/RT with D = 3.197e-10 m^2/s in both phases, as in Hong (the Li+ flux
-    # vanishes in the metal through c -> 0). With D_e = 7.5e-13 (Chen) the Li consumed in the
-    # metal-side half of the interface cannot be resupplied: c is clipped at 0 and 20-60 % of the
-    # deposited Li is created by the bound.
-    # L1o = L_sigma (m^3/(J s)), L2o = L_eta (1/s), S1o, S2o = sigma_e, sigma_l (S/m).
-    # L_eta = 1/s of Chen et al. makes the Butler-Volmer term outgrow the double well for any
-    # eta > 3e-5, so the whole electrolyte turns into a dilute deposit; Hong's 0.001/s does not.
-    prop_names  = 'Meo Mso L1o L2o ko S1o S2o'
-    prop_values = '1.28178e-13 1.28178e-13 2.5e-6 1e-3 $ko 1e7 1.19'
+    prop_names  = 'De Dl L1o L2o S1o S2o'
+    prop_values = '7.5e-13 3.0e-10 0.179525 0.408888 1e7 1.19'
   [../]
+  # ko: gradient energy coefficient (J/m); Wo: double-well barrier height (J/m^3)
+  # Al, As: free energy curvature (J/m^3); Al = c_0*RT/2 matches the ideal-solution
+  # curvature at c = 1, so the chemical diffusivity there equals Dl.
+  # Bl = Bs: no chemical driving force at the equilibrium compositions; the
+  # deposition driving force comes only from the overpotential (Butler-Volmer).
+  [./thermo_constants]
+    type = GenericConstantMaterial
+    prop_names  = 'ko Wo Al As cleq cseq Bl Bs'
+    prop_values = '$kappa $W 1.25e6 1.25e6 1 0 0 0'
+  [../]
+
+  # ---- derived parameters (converted to model units) ----
   [./L1]
     type = ParsedMaterial
     expression = '((length_scale)^3/(energy_scale*time_scale))*L1o'
     property_name = L1
     material_property_names = 'L1o length_scale energy_scale time_scale'
-    outputs = exodus
   [../]
   [./L2]
     type = ParsedMaterial
     expression = 'L2o/time_scale'
     property_name = L2
     material_property_names = 'L2o time_scale'
-    outputs = exodus
   [../]
   [./kappa_isotropy]
     type = ParsedMaterial
     property_name = kappa
     expression = '(energy_scale/length_scale)*ko'
     material_property_names = 'ko length_scale energy_scale'
-    outputs = exodus
   [../]
+  [./barrier_height]
+    type = ParsedMaterial
+    property_name = W
+    expression = '(energy_scale/(length_scale)^3)*Wo'
+    material_property_names = 'Wo length_scale energy_scale'
+  [../]
+
   # h(eta)
   [./h]
     type = SwitchingFunctionMaterial
     h_order = HIGH
     eta = eta
-    outputs = exodus
   [../]
   # g(eta)
   [./g]
@@ -213,18 +204,34 @@
     g_order = SIMPLE
     eta = eta
   [../]
-  # Bulk free energy: double well only (no fl/fs, hence no chemical driving force).
-  # The ion part, RT*c*(ln(c)-1), enters through the Nernst-Planck kernels below.
+
+  # ---- free energies ----
+  [./fl]
+    type = DerivativeParsedMaterial
+    property_name = fl
+    material_property_names = 'Al Bl cleq length_scale energy_scale'
+    coupled_variables = 'c'
+    expression = '(energy_scale/(length_scale)^3)*(Al*(c-cleq)^2 + Bl)'
+    derivative_order = 3
+  [../]
+  [./fs]
+    type = DerivativeParsedMaterial
+    property_name = fs
+    material_property_names = 'As Bs cseq length_scale energy_scale'
+    coupled_variables = 'c'
+    expression = '(energy_scale/(length_scale)^3)*(As*(c-cseq)^2 + Bs)'
+    derivative_order = 3
+  [../]
+  # Written explicitly: DerivativeTwoPhaseMaterial returns a wrong d3F/dc2deta.
   [./free_energy]
     type = DerivativeParsedMaterial
     property_name = F
-    coupled_variables = 'eta'
-    # W = 12*gamma/delta = 2.224e6 J/m^3, in eV/um^3
-    constant_names = 'W'
-    constant_expressions = '2.224e6*6.24150943'
-    expression = 'W*eta^2*(1-eta)^2'
-    derivative_order = 2
+    coupled_variables = 'c eta'
+    material_property_names = 'fl(c) fs(c) h(eta) g(eta) W'
+    expression = 'h*fs + (1-h)*fl + W*g'
+    derivative_order = 3
   [../]
+
   # BV driving force
   [./Butlervolmer]
     type = DerivativeParsedMaterial
@@ -232,98 +239,107 @@
     coupled_variables = 'pot c eta'
     property_name = f_bv
     material_property_names = 'L2 alpha Faraday valency RT dh:=D[h,eta]'
-    outputs = exodus
     derivative_order = 1
   [../]
-  # diffusion for c
-  [./Deff]
+
+  # ---- transport of c ----
+  # D(eta) in um^2/ms
+  [./D]
     type = DerivativeParsedMaterial
-    expression = '(length_scale)^2/time_scale*(Meo*h+Mso*(1-h))'
+    expression = '(length_scale)^2/time_scale*(De*h+Dl*(1-h))'
     coupled_variables = 'eta'
-    property_name = Deff
-    material_property_names = 'Meo Mso h(eta) length_scale time_scale'
-    outputs = exodus
-    derivative_order = 1
+    property_name = D
+    material_property_names = 'De Dl h(eta) length_scale time_scale'
+    derivative_order = 2
   [../]
-  # Fick diffusivity of the dilute solution: D = M*RT (M = Deff above is a mobility).
-  [./Dfick]
+  # M = D*c/(RT*c_0), converted to um^3/(eV ms) so that M*grad(dF/dc) is in 1/ms
+  [./M]
     type = DerivativeParsedMaterial
-    expression = 'Deff*RT'
-    coupled_variables = 'eta'
-    property_name = Dfick
-    material_property_names = 'Deff(eta) RT'
-    outputs = exodus
-    derivative_order = 1
+    expression = 'D*c/(RT*c_0)*(length_scale)^3/energy_scale'
+    coupled_variables = 'c eta'
+    property_name = M
+    material_property_names = 'D(eta) RT c_0 length_scale energy_scale'
+    derivative_order = 2
   [../]
+  # electromigration coefficient D*c*n*Faraday/RT (um^2/(ms V))
   [./Deffe]
     type = DerivativeParsedMaterial
-    expression = '(length_scale)^2/time_scale*(Meo*h+Mso*(1-h))*c*valency*Faraday'
+    expression = 'D*c*valency*Faraday/RT'
     coupled_variables = 'eta c'
     property_name = Deffe
-    material_property_names = 'Meo Mso h(eta) length_scale time_scale valency Faraday'
-    outputs = exodus
+    material_property_names = 'D(eta) valency Faraday RT'
     derivative_order = 1
   [../]
   [./coupled_eta_function]
     type = ParsedMaterial
-    expression = 'c_s/c_0'	# normalize
+    expression = 'c_s/c_0'  # normalize
     property_name = ft
     material_property_names = 'c_s c_0'
-    outputs = exodus
   [../]
-  # conduction for pot
+
+  # ---- conduction for pot ----
   [./ElecEff]
     type = DerivativeParsedMaterial
     expression = '(S1o*h+S2o*(1-h))/length_scale'
     coupled_variables = 'eta'
     property_name = ElecEff
     material_property_names = 'S1o S2o h(eta) length_scale'
-    outputs = exodus
+    derivative_order = 1
   [../]
+  # n*Faraday*c_s in C/um^3; time_scale converts deta/dt from 1/ms to 1/s
   [./ChargeEff]
     type = ParsedMaterial
-    # time_scale converts d(eta)/dt from model time to seconds.
-    expression = 'valency*Faraday*c_s*time_scale/(length_scale^3)'
+    expression = 'valency*Faraday*c_s/(length_scale^3)*time_scale'
     property_name = ChargeEff
     material_property_names = 'valency Faraday length_scale c_s time_scale'
-    outputs = exodus
   [../]
 
+  # Li inventory density c + (c_s/c_0)*eta for the conservation check
+  [./li_total_density]
+    type = ParsedMaterial
+    property_name = li_total_density
+    expression = 'c+ft*eta'
+    material_property_names = 'ft'
+    coupled_variables = 'c eta'
+  [../]
 []
 
 [Kernels]
   #
-  # Nernst-Planck equation for c
+  # Concentration equation
   #
   [./dcdt]
     type = TimeDerivative
     variable = c
     save_in = c_residual
   [../]
-  # Fickian part of the Nernst-Planck flux (dilute-solution chemical potential RT*ln(c)).
-  [./diff]
-    type = MatDiffusion
+  # -div(M grad(dF/dc))
+  [./ch]
+    type = CahnHilliard
     variable = c
-    diffusivity = Dfick
-    args = 'eta'
     save_in = c_residual
+    f_name = F
+    mob_name = M
+    coupled_variables = 'eta'
   [../]
+  # -div(D*c*n*Faraday/RT grad(pot))
   [./elec]
-  	type = MatDiffusion
+    type = MatDiffusion
     variable = c
     save_in = c_residual
     v = pot
     diffusivity = Deffe
-    args = 'eta c'
+    args = 'eta'
   [../]
   [./cSource]
-  	type = CoupledSusceptibilityTimeDerivative
+    type = CoupledSusceptibilityTimeDerivative
     variable = c
     save_in = c_residual
     v = eta
     f_name = ft
   [../]
 
+  #
   # Allen-Cahn Equation
   #
   [./detadt]
@@ -333,8 +349,9 @@
   [./ac]
     type = AllenCahn
     variable = eta
-  	f_name = F
-  	mob_name = L1
+    coupled_variables = 'c'
+    f_name = F
+    mob_name = L1
   [../]
   [./ACInterface]
     type = ACInterface
@@ -343,10 +360,10 @@
     mob_name = L1
   [../]
   [./BV]
-	type = MKinetics
-	variable = eta
-	f_name = f_bv
-	coupled_variables = 'c pot eta'
+    type = MKinetics
+    variable = eta
+    f_name = f_bv
+    coupled_variables = 'c pot'
   [../]
   [./noise_interface]
     type = LangevinNoise
@@ -355,14 +372,15 @@
     amplitude = $Noise
   [../]
 
-  # evolution of pot
+  #
+  # Potential: div(sigma grad(pot)) = n*Faraday*c_s*deta/dt
+  #
   [./Cond]
     type = MatDiffusion
     variable = pot
     diffusivity = ElecEff
     args = 'eta'
   [../]
-  # -nFcs(deta/dt)
   [./coupledSource]
     type = CoupledSusceptibilityTimeDerivative
     variable = pot
@@ -370,7 +388,6 @@
     f_name = ChargeEff
   [../]
 []
-
 
 [AuxKernels]
   [./tip_coordinate]
@@ -381,35 +398,18 @@
     expression = 'if(eta>=0.5,x,-1)'
     execute_on = 'INITIAL TIMESTEP_END'
   [../]
-  [./in_interface]
-    type = ParsedAux
-    variable = in_interface
-    coupled_variables = 'eta'
-    expression = 'if(eta>0.1&eta<0.9,1,0)'
-    execute_on = 'INITIAL TIMESTEP_END'
-  [../]
-  [./trough_coordinate]
-    type = ParsedAux
-    variable = trough_coordinate
-    coupled_variables = 'eta'
-    use_xyzt = true
-    expression = 'if(eta<0.5,x,1e3)'
-    execute_on = 'INITIAL TIMESTEP_END'
-  [../]
 []
 
 [Executioner]
   type = Transient
   solve_type = 'NEWTON'
   scheme = implicit-euler
-  # The default line search of vinewtonrsls stalls on the first steps of this formulation.
-  line_search = none
 
   petsc_options_iname = '-ksp_type -pc_type -pc_factor_mat_solver_type -snes_type'
   petsc_options_value = 'preonly   lu        mumps                      vinewtonrsls'
 
   dtmax = 1
-  end_time = 400
+  end_time = 5E3
 
   [./TimeStepper]
     type = IterationAdaptiveDT
@@ -418,9 +418,6 @@
   [../]
 []
 
-#
-# Precondition using handcoded off-diagonal terms
-#
 [Preconditioning]
   [./full]
     type = SMP
@@ -429,110 +426,64 @@
 []
 
 [Postprocessors]
-  # Lithium balance: integral(c + ft*eta) - initial = time integral of the inflow at the right
-  # boundary, taken from the residual of the c equation at the prescribed-c nodes.
+  # Lithium balance: change of integral(c + ft*eta) minus the time-integrated
+  # inflow (residual at the prescribed-c nodes), relative to the inventory change.
   [./li_total]
     type = ElementIntegralMaterialProperty
     mat_prop = li_total_density
     execute_on = 'INITIAL TIMESTEP_END'
+    outputs = none
   [../]
   [./li_initial]
     type = ElementIntegralMaterialProperty
     mat_prop = li_total_density
     execute_on = 'INITIAL'
+    outputs = none
   [../]
   [./li_in_rate]
     type = NodalSum
     variable = c_residual
     boundary = right
-    execute_on = 'INITIAL TIMESTEP_END'
+    execute_on = 'TIMESTEP_END'
     outputs = none
   [../]
-  [./li_net_in]
+  [./li_in]
     type = TimeIntegratedPostprocessor
     value = li_in_rate
     time_integration_scheme = implicit-euler
-    execute_on = 'INITIAL TIMESTEP_END'
+    execute_on = 'TIMESTEP_END'
+    outputs = none
   [../]
-  # Relative to the inventory change; the floor avoids dividing by ~0 at the start.
   [./li_balance_error]
     type = ParsedPostprocessor
-    pp_names = 'li_total li_initial li_net_in'
-    expression = 'abs(li_total-li_initial-li_net_in)/max(abs(li_total-li_initial),1e-3*abs(li_initial))'
-    execute_on = 'INITIAL TIMESTEP_END'
+    pp_names = 'li_total li_initial li_in'
+    expression = 'abs(li_total-li_initial-li_in)/max(abs(li_total-li_initial),1e-3*abs(li_initial))'
+    execute_on = 'TIMESTEP_END'
   [../]
 
   # Dendrite tip tracking
-  [./tip_x_nodal]
+  [./tip_x]
     type = NodalExtremeValue
     variable = tip_coordinate
     value_type = max
     execute_on = 'INITIAL TIMESTEP_END'
     force_postaux = true
   [../]
-
-  # Front shape. For a planar front interface_width is the 0.1-0.9 width and
-  # front_roughness (tip minus deepest point of the eta = 0.5 front) is ~ one element.
-  [./interface_area]
-    type = ElementIntegralVariablePostprocessor
-    variable = in_interface
-    execute_on = 'INITIAL TIMESTEP_END'
-    outputs = none
-  [../]
-  [./interface_width]
-    type = ParsedPostprocessor
-    pp_names = 'interface_area'
-    expression = 'interface_area/100'
-    execute_on = 'INITIAL TIMESTEP_END'
-  [../]
-  [./trough_x_nodal]
-    type = NodalExtremeValue
-    variable = trough_coordinate
-    value_type = min
-    execute_on = 'INITIAL TIMESTEP_END'
-    force_postaux = true
-  [../]
-  [./front_roughness]
-    type = ParsedPostprocessor
-    pp_names = 'tip_x_nodal trough_x_nodal'
-    expression = 'tip_x_nodal-trough_x_nodal'
-    execute_on = 'INITIAL TIMESTEP_END'
-  [../]
-  [./mean_front_x]
-    type = ElementIntegralVariablePostprocessor
-    variable = eta
-    execute_on = 'INITIAL TIMESTEP_END'
-    outputs = none
-  [../]
-  [./front_x]
-    type = ParsedPostprocessor
-    pp_names = 'mean_front_x'
-    expression = 'mean_front_x/100'
-    execute_on = 'INITIAL TIMESTEP_END'
-  [../]
-
-  [./tip_gap_nodal]
-    type = ParsedPostprocessor
-    pp_names = 'tip_x_nodal'
-    expression = '100-tip_x_nodal'
-    execute_on = 'INITIAL TIMESTEP_END'
-  [../]
 []
 
 [UserObjects]
   [./stop_at_right]
     type = Terminator
-    expression = 'tip_x_nodal >= 0 & tip_gap_nodal <= 10'
+    expression = 'tip_x >= 90'
     fail_mode = HARD
     error_level = INFO
     message = 'Nodal eta>=0.5 tip is within 10 units of x=100.'
     execute_on = TIMESTEP_END
     execution_order_group = 1
   [../]
-
   [./stop_at_left]
     type = Terminator
-    expression = 'tip_x_nodal <= 5'
+    expression = 'tip_x <= 5'
     fail_mode = HARD
     error_level = INFO
     message = 'Nodal eta>=0.5 tip has retreated to x<=5, or the solid phase has disappeared.'
@@ -543,7 +494,7 @@
 
 [Outputs]
   file_base = results/$CASE/$CASE
-  # Save every accepted step so field-based checks are possible.
+  # write every 10th time step
   [./exodus]
     type = Exodus
     time_step_interval = 10
