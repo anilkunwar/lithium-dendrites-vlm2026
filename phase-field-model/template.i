@@ -149,21 +149,30 @@
     prop_values = '7.69e4 1e3 1 2.2e-5 96485 2494.2 0.5'
   [../]
   # De, Dl: Li+ diffusivity in electrode / electrolyte (m^2/s)
+  # L1o: interface mobility (m^3/(J s)); L2o: reaction (Butler-Volmer) rate constant (1/s)
+  #   L1o*kappa*curvature is the curvature-driven interface speed; with L1o ~ 0.1 it reaches
+  #   ~0.4 m/s at 1 um radius, far above the transport-limited deposition speed, and smooths
+  #   every finger. L2o ~ 0.4 /s lets the BV term outgrow the double well at eta ~ 1e-3, so the
+  #   electrolyte metallizes. 2.5e-6 and 1e-3 follow Hong & Viswanathan 2018.
   # S1o, S2o: conductivity of Li metal / electrolyte (S/m)
   [./system_constants]
     type = GenericConstantMaterial
     prop_names  = 'De Dl L1o L2o S1o S2o'
-    prop_values = '7.5e-13 3.0e-10 0.179525 0.408888 1e7 1.19'
+    prop_values = '7.5e-13 3.0e-10 2.5e-6 1e-3 1e7 1.19'
   [../]
   # ko: gradient energy coefficient (J/m); Wo: double-well barrier height (J/m^3)
   # Al, As: free energy curvature (J/m^3); Al = c_0*RT/2 matches the ideal-solution
   # curvature at c = 1, so the chemical diffusivity there equals Dl.
+  # As << Al: with c following the local equilibrium across the interface, the bulk terms add
+  # up to ~0.5*As*Al/(As+Al) to the interface barrier (3.1e5 J/m^3 for As = Al). As = 1e4 keeps
+  # it at 8e3 J/m^3, small next to W/16, so sigma and delta are set by kappa and W. As only acts
+  # in the metal, where c ~ 0 and De is negligible, so it does not affect transport.
   # Bl = Bs: no chemical driving force at the equilibrium compositions; the
   # deposition driving force comes only from the overpotential (Butler-Volmer).
   [./thermo_constants]
     type = GenericConstantMaterial
     prop_names  = 'ko Wo Al As cleq cseq Bl Bs'
-    prop_values = '$kappa $W 1.25e6 1.25e6 1 0 0 0'
+    prop_values = '$kappa $W 1.25e6 1e4 1 0 0 0'
   [../]
 
   # ---- derived parameters (converted to model units) ----
@@ -252,7 +261,7 @@
     material_property_names = 'De Dl h(eta) length_scale time_scale'
     derivative_order = 2
   [../]
-  # M = D*c/(RT*c_0), converted to um^3/(eV ms) so that M*grad(dF/dc) is in 1/ms
+  # M = D*c/(RT*c_0) (m^5/(J s)), converted to um^5/(eV ms) so that div(M grad(dF/dc)) is in 1/ms
   [./M]
     type = DerivativeParsedMaterial
     expression = 'D*c/(RT*c_0)*(length_scale)^3/energy_scale'
@@ -408,8 +417,11 @@
   petsc_options_iname = '-ksp_type -pc_type -pc_factor_mat_solver_type -snes_type'
   petsc_options_value = 'preonly   lu        mumps                      vinewtonrsls'
 
-  dtmax = 1
-  end_time = 5E3
+  # Planar front speed v = L2o*exp(alpha*F*|POT_LEFT|/RT)*kappa/sigma: ~2e-6 m/s at -0.3 V and
+  # ~2e-8 m/s at -0.1 V, so the 80 um to the stop at x = 90 takes ~40-3400 s.
+  # dtmax = 100 ms moves the fastest front ~0.2 um (0.4 elements) per step.
+  dtmax = 100
+  end_time = 4E6
 
   [./TimeStepper]
     type = IterationAdaptiveDT
