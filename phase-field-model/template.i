@@ -22,10 +22,6 @@
 #   (sigma = 0.5 J/m^2, delta = 2.5 um: kappa = 1.70e-6 J/m, W = 2.64e6 J/m^3)
 # ---------------------------------------------------------------------------
 
-[GlobalParams]
-  seed = 12345
-[]
-
 [Mesh]
   # fixed mesh, dx = 0.5 um
   type = GeneratedMesh
@@ -374,10 +370,13 @@
     f_name = f_bv
     coupled_variables = 'c pot'
   [../]
+  # Noise from the uniform_noise user object: masked by dh/deta (interface only) and shifted
+  # to zero mean over the mask, so it adds no net eta. Its random numbers are seeded per element,
+  # so the pattern does not depend on the number of MPI ranks (LangevinNoise repeats per rank).
   [./noise_interface]
-    type = LangevinNoise
+    type = ConservedLangevinNoise
     variable = eta
-    multiplier = dh/deta
+    noise = uniform_noise
     amplitude = $Noise
   [../]
 
@@ -484,6 +483,11 @@
 []
 
 [UserObjects]
+  [./uniform_noise]
+    type = ConservedMaskedUniformNoise
+    mask = dh/deta
+    seed = 12345
+  [../]
   [./stop_at_right]
     type = Terminator
     expression = 'tip_x >= 90'
