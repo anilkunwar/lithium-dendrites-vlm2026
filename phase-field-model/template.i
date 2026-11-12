@@ -476,10 +476,10 @@
   petsc_options_iname = '-ksp_type -pc_type -sub_pc_type -pc_asm_overlap -ksp_gmres_restart -snes_type'
   petsc_options_value = 'gmres     asm      lu           2               100                vinewtonrsls'
 
-  # Planar front speed v = L2o*exp(alpha*F*|POT_LEFT|/RT)*kappa/sigma: ~2e-6 m/s at -0.3 V and
-  # ~2e-8 m/s at -0.1 V, so the 80 um to the stop at x = 90 takes ~40-3400 s.
-  # dtmax = 100 ms moves the fastest front ~0.2 um (0.4 elements) per step.
-  dtmax = 100
+  # Front speed ~0.03 um/s at -0.1 V up to ~20 um/s (finger tips) at -0.45 V: the run to the stop
+  # at x = 90 takes from a few s to ~1 h of model time. dtmax = 1000 ms keeps the slow (low
+  # potential) cases to a few thousand steps; IterationAdaptiveDT cuts dt where Newton struggles.
+  dtmax = 1000
   end_time = 4E6
 
   [./TimeStepper]
