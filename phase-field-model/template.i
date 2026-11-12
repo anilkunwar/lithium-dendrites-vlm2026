@@ -4,22 +4,27 @@
 # Model units: length um, time ms, energy eV. c is the Li+ concentration
 # normalized by c_0; pot is the electric potential in V.
 #
-# Placeholders: $POT_LEFT $Noise $kappa (J/m) $W (J/m^3) $CASE
+# Placeholders: $POT_LEFT $Noise (dimensionless, 0-1) $SEED $kappa (J/m) $W (J/m^3) $L1o $CASE
 # ($kappa and $W are derived from sigma and delta by generate_moose_simulation_files.py)
 #
 # ---------------------------------------------------------------------------
-# Concentration equation (derived from the free energy, not ideal Nernst-Planck)
-#   Total free energy density: F(c,eta) = h*fs(c) + (1-h)*fl(c) + W*g(eta)   [J/m^3]
+# Concentration equation (derived from the free energy: Nernst-Planck as one gradient flow)
+#   Total free energy density: F(c,eta) = fl(c) + W*g(eta)   [J/m^3]
+#   The ion free energy fl(c) is not weighted by h: a (1-h)*fl(c) term would make the AC driving
+#   force h'*(fs-fl) favour the solid wherever the electrolyte is depleted, so the interface
+#   would consume its own Li+ (runaway down to the c >= 0 bound). Deposition is driven by the
+#   Butler-Volmer term alone, whose c factor carries the concentration dependence.
 #   Electrochemical potential per mol Li+: mu_e = (1/c_0) dF/dc + n*Faraday*pot
 #   Flux (mol/m^2/s): J = -(D*C/RT) grad(mu_e), C = c_0*c
 #   => dc/dt + (c_s/c_0) deta/dt = div[ M grad(dF/dc) + (D*c*n*Faraday/RT) grad(pot) ]
-#      with M = D*c/(RT*c_0).
-#   With fl = Al*(c-1)^2, chemical diffusivity in the liquid = D*c*2*Al/(c_0*RT).
+#      with M = D*c/(RT*c_0), the same mobility as the migration term.
+#   With the ideal solution fl = c_0*RT*(c*ln(c) - c), M*d2fl/dc2 = D: Fickian diffusion that
+#   does not vanish at c -> 0. (A quadratic fl with this M gives D*c*grad(c): no Li+ could reach
+#   the c ~ 0 metal side of the interface and the c >= 0 bound created ~9 % of the deposit.)
 #
 # Interface (double well W*g, g = eta^2(1-eta)^2, gradient energy kappa/2|grad eta|^2)
 #   sigma = sqrt(2*W*kappa)/6,  delta(10-90%) = 2.2*sqrt(2*kappa/W)
 #   sigma, delta given => kappa = 3*sigma*delta/2.2,  W = 13.2*sigma/delta
-#   (sigma = 0.5 J/m^2, delta = 2.5 um: kappa = 1.70e-6 J/m, W = 2.64e6 J/m^3)
 # ---------------------------------------------------------------------------
 
 [Mesh]
@@ -57,6 +62,13 @@
 
 [AuxVariables]
   [./bounds_dummy]
+    order = FIRST
+    family = LAGRANGE
+  [../]
+
+  # Frozen random field in [-1, 1]: local scatter of the exchange current density (e.g. a
+  # non-uniform SEI). It scales the Butler-Volmer rate, see Butlervolmer.
+  [./xi]
     order = FIRST
     family = LAGRANGE
   [../]
@@ -99,16 +111,45 @@
   [../]
 []
 
+[Functions]
+  # Equilibrium interface at x = 10. A sharp step relaxes toward this width, and every change of
+  # eta must be absorbed by c with factor c_s/c_0 = 77, so c hits its bounds and the Newton
+  # solve fails. eta = 0.5*(1-tanh((x-10)/(2*l))), l = sqrt(kappa/(2*W)) (in um), whose
+  # 0.1-0.9 width is 4.39*l = delta.
+  [./eta_ic]
+    type = ParsedFunction
+    expression = '0.5*(1-tanh((x-10)/(2e6*sqrt(kappa/(2*W)))))'
+    symbol_names = 'kappa W'
+    symbol_values = '$kappa $W'
+  [../]
+  # Li+ only in the electrolyte part: c = 1-h(eta_ic), h = p^3*(6p^2-15p+10)
+  # ('e' is not usable as a symbol name: the parser reserves it for Euler's number.)
+  [./c_ic]
+    type = ParsedFunction
+    expression = '1-p^3*(6*p^2-15*p+10)'
+    symbol_names = 'p'
+    symbol_values = 'eta_ic'
+  [../]
+[]
+
 [ICs]
   [./eta]
     variable = eta
     type = FunctionIC
-    function = 'if(x>=0&x<=10,1,0)'
+    function = eta_ic
   [../]
   [./c]
     variable = c    # lithium ion concentration
     type = FunctionIC
-    function = 'if(x>=0&x<=10,0,1)'
+    function = c_ic
+  [../]
+  # seeded per node id, so the field does not depend on the number of MPI ranks
+  [./xi]
+    variable = xi
+    type = RandomIC
+    min = -1
+    max = 1
+    seed = $SEED
   [../]
 []
 
@@ -134,13 +175,16 @@
 []
 
 [Materials]
+  # every material property is written to the exodus file (elemental averages)
   [./scale]
     type = GenericConstantMaterial
+    outputs = exodus
     prop_names = 'length_scale energy_scale time_scale'
     prop_values = '1e6 6.24150943e18 1e3'
   [../]
   [./constants]
     type = GenericConstantMaterial
+    outputs = exodus
     prop_names  = 'c_s c_0 valency molar_vol Faraday RT alpha'
     prop_values = '7.69e4 1e3 1 2.2e-5 96485 2494.2 0.5'
   [../]
@@ -149,49 +193,55 @@
   #   L1o*kappa*curvature is the curvature-driven interface speed; with L1o ~ 0.1 it reaches
   #   ~0.4 m/s at 1 um radius, far above the transport-limited deposition speed, and smooths
   #   every finger. L2o ~ 0.4 /s lets the BV term outgrow the double well at eta ~ 1e-3, so the
-  #   electrolyte metallizes. 2.5e-6 and 1e-3 follow Hong & Viswanathan 2018.
+  #   electrolyte metallizes. L2o = 1e-3 follows Hong & Viswanathan 2018.
+  #   L1o is set per case by the generator so that the Butler-Volmer rate stays a fixed fraction
+  #   r of the Allen-Cahn restoring rate: L2o*exp(alpha*F*|POT_LEFT|/RT)*1.875 = r*L1o*W.
+  #   A fixed L1o (2.5e-6) gave r ~ 2 at -0.45 V: the BV term outgrew the double well and the
+  #   deposit turned into a diffuse eta ~ 0.6 region (33 % of the Li created by the c >= 0 bound).
   # S1o, S2o: conductivity of Li metal / electrolyte (S/m)
   [./system_constants]
     type = GenericConstantMaterial
+    outputs = exodus
     prop_names  = 'De Dl L1o L2o S1o S2o'
-    prop_values = '7.5e-13 3.0e-10 2.5e-6 1e-3 1e7 1.19'
+    # Dl = 1e-9 (upper end of liquid electrolytes, 1e-10 to 1e-9): 3e-10 could not resupply the
+    # metal side of the moving interface, and the c >= 0 bound created ~5 % of the deposit.
+    prop_values = '7.5e-13 1.0e-9 $L1o 1e-3 1e7 1.19'
   [../]
   # ko: gradient energy coefficient (J/m); Wo: double-well barrier height (J/m^3)
-  # Al, As: free energy curvature (J/m^3); Al = c_0*RT/2 matches the ideal-solution
-  # curvature at c = 1, so the chemical diffusivity there equals Dl.
-  # As << Al: with c following the local equilibrium across the interface, the bulk terms add
-  # up to ~0.5*As*Al/(As+Al) to the interface barrier (3.1e5 J/m^3 for As = Al). As = 1e4 keeps
-  # it at 8e3 J/m^3, small next to W/16, so sigma and delta are set by kappa and W. As only acts
-  # in the metal, where c ~ 0 and De is negligible, so it does not affect transport.
-  # Bl = Bs: no chemical driving force at the equilibrium compositions; the
-  # deposition driving force comes only from the overpotential (Butler-Volmer).
+  # The ion free energy fl does not depend on eta, so the deposition driving force comes only
+  # from the overpotential (Butler-Volmer).
   [./thermo_constants]
     type = GenericConstantMaterial
-    prop_names  = 'ko Wo Al As cleq cseq Bl Bs'
-    prop_values = '$kappa $W 1.25e6 1e4 1 0 0 0'
+    outputs = exodus
+    prop_names  = 'ko Wo'
+    prop_values = '$kappa $W'
   [../]
 
   # ---- derived parameters (converted to model units) ----
   [./L1]
     type = ParsedMaterial
+    outputs = exodus
     expression = '((length_scale)^3/(energy_scale*time_scale))*L1o'
     property_name = L1
     material_property_names = 'L1o length_scale energy_scale time_scale'
   [../]
   [./L2]
     type = ParsedMaterial
+    outputs = exodus
     expression = 'L2o/time_scale'
     property_name = L2
     material_property_names = 'L2o time_scale'
   [../]
   [./kappa_isotropy]
     type = ParsedMaterial
+    outputs = exodus
     property_name = kappa
     expression = '(energy_scale/length_scale)*ko'
     material_property_names = 'ko length_scale energy_scale'
   [../]
   [./barrier_height]
     type = ParsedMaterial
+    outputs = exodus
     property_name = W
     expression = '(energy_scale/(length_scale)^3)*Wo'
     material_property_names = 'Wo length_scale energy_scale'
@@ -200,66 +250,72 @@
   # h(eta)
   [./h]
     type = SwitchingFunctionMaterial
+    outputs = exodus
     h_order = HIGH
     eta = eta
   [../]
   # g(eta)
   [./g]
     type = BarrierFunctionMaterial
+    outputs = exodus
     g_order = SIMPLE
     eta = eta
   [../]
 
   # ---- free energies ----
+  # ideal solution of Li+ (reference c = 1); plog regularizes ln(c) below c = 1e-6
   [./fl]
     type = DerivativeParsedMaterial
+    outputs = exodus
     property_name = fl
-    material_property_names = 'Al Bl cleq length_scale energy_scale'
+    material_property_names = 'c_0 RT length_scale energy_scale'
     coupled_variables = 'c'
-    expression = '(energy_scale/(length_scale)^3)*(Al*(c-cleq)^2 + Bl)'
+    expression = '(energy_scale/(length_scale)^3)*c_0*RT*(c*plog(c,1e-6) - c)'
     derivative_order = 3
   [../]
-  [./fs]
-    type = DerivativeParsedMaterial
-    property_name = fs
-    material_property_names = 'As Bs cseq length_scale energy_scale'
-    coupled_variables = 'c'
-    expression = '(energy_scale/(length_scale)^3)*(As*(c-cseq)^2 + Bs)'
-    derivative_order = 3
-  [../]
-  # Written explicitly: DerivativeTwoPhaseMaterial returns a wrong d3F/dc2deta.
   [./free_energy]
     type = DerivativeParsedMaterial
+    outputs = exodus
     property_name = F
     coupled_variables = 'c eta'
-    material_property_names = 'fl(c) fs(c) h(eta) g(eta) W'
-    expression = 'h*fs + (1-h)*fl + W*g'
+    material_property_names = 'fl(c) g(eta) W'
+    expression = 'fl + W*g'
     derivative_order = 3
   [../]
 
-  # BV driving force
+  # BV driving force. The rate constant scatters as L2*(1 + Noise*xi): noise in the reaction
+  # rate rather than an additive eta noise. An additive eta noise changes eta where no Li+ is
+  # available, and c must absorb 77x that change (c up to 23, Li+ trapped in the metal, c >= 0
+  # clipping). Here every eta change still comes with the c factor of the cathodic term.
   [./Butlervolmer]
     type = DerivativeParsedMaterial
-    expression = 'L2*dh*(exp(pot*(1-alpha)*Faraday*valency/RT)-c*exp(-pot*alpha*Faraday*valency/RT))'
-    coupled_variables = 'pot c eta'
+    outputs = exodus
+    constant_names = 'A_noise'
+    constant_expressions = '$Noise'
+    expression = 'L2*(1+A_noise*xi)*dh*(exp(pot*(1-alpha)*Faraday*valency/RT)-c*exp(-pot*alpha*Faraday*valency/RT))'
+    coupled_variables = 'pot c eta xi'
     property_name = f_bv
     material_property_names = 'L2 alpha Faraday valency RT dh:=D[h,eta]'
     derivative_order = 1
   [../]
 
   # ---- transport of c ----
-  # D(eta) in um^2/ms
+  # D(eta) in um^2/ms, linear in eta. With h(eta), D fell to 1e-3*Dl at eta = 0.95, so Li+ could
+  # not reach the metal side of a moving interface and the c >= 0 bound created ~11 % of the
+  # deposit at -0.35 V; linear in eta it is still 0.05*Dl there and De in the bulk metal.
   [./D]
     type = DerivativeParsedMaterial
-    expression = '(length_scale)^2/time_scale*(De*h+Dl*(1-h))'
+    outputs = exodus
+    expression = '(length_scale)^2/time_scale*(De*eta+Dl*(1-eta))'
     coupled_variables = 'eta'
     property_name = D
-    material_property_names = 'De Dl h(eta) length_scale time_scale'
+    material_property_names = 'De Dl length_scale time_scale'
     derivative_order = 2
   [../]
   # M = D*c/(RT*c_0) (m^5/(J s)), converted to um^5/(eV ms) so that div(M grad(dF/dc)) is in 1/ms
   [./M]
     type = DerivativeParsedMaterial
+    outputs = exodus
     expression = 'D*c/(RT*c_0)*(length_scale)^3/energy_scale'
     coupled_variables = 'c eta'
     property_name = M
@@ -269,6 +325,7 @@
   # electromigration coefficient D*c*n*Faraday/RT (um^2/(ms V))
   [./Deffe]
     type = DerivativeParsedMaterial
+    outputs = exodus
     expression = 'D*c*valency*Faraday/RT'
     coupled_variables = 'eta c'
     property_name = Deffe
@@ -277,15 +334,24 @@
   [../]
   [./coupled_eta_function]
     type = ParsedMaterial
+    outputs = exodus
     expression = 'c_s/c_0'  # normalize
     property_name = ft
     material_property_names = 'c_s c_0'
   [../]
 
   # ---- conduction for pot ----
+  # Logarithmic (geometric) mean S1o^h * S2o^(1-h), with S1o/S2o ~ 8e6:
+  #   linear mean: the tail (eta ~ 0.02) is already metallic, the field vanishes ahead of the
+  #     reaction zone and Li+ piles up there (c ~ 1.09 at x ~ 15);
+  #   harmonic mean: the reaction zone keeps the electrolyte conductivity, so the charge source
+  #     n*F*c_s*deta/dt digs a potential well below the electrode potential (0.04 V at -0.42 V)
+  #     that speeds up the deposition that digs it, and the Newton solve diverges.
+  #   The geometric mean is ~3e3 S/m at h = 0.5 and ~1.6 S/m at h = 0.02, avoiding both.
   [./ElecEff]
     type = DerivativeParsedMaterial
-    expression = '(S1o*h+S2o*(1-h))/length_scale'
+    outputs = exodus
+    expression = 'exp(h*log(S1o)+(1-h)*log(S2o))/length_scale'
     coupled_variables = 'eta'
     property_name = ElecEff
     material_property_names = 'S1o S2o h(eta) length_scale'
@@ -294,6 +360,7 @@
   # n*Faraday*c_s in C/um^3; time_scale converts deta/dt from 1/ms to 1/s
   [./ChargeEff]
     type = ParsedMaterial
+    outputs = exodus
     expression = 'valency*Faraday*c_s/(length_scale^3)*time_scale'
     property_name = ChargeEff
     material_property_names = 'valency Faraday length_scale c_s time_scale'
@@ -302,6 +369,7 @@
   # Li inventory density c + (c_s/c_0)*eta for the conservation check
   [./li_total_density]
     type = ParsedMaterial
+    outputs = exodus
     property_name = li_total_density
     expression = 'c+ft*eta'
     material_property_names = 'ft'
@@ -370,16 +438,6 @@
     f_name = f_bv
     coupled_variables = 'c pot'
   [../]
-  # Noise from the uniform_noise user object: masked by dh/deta (interface only) and shifted
-  # to zero mean over the mask, so it adds no net eta. Its random numbers are seeded per element,
-  # so the pattern does not depend on the number of MPI ranks (LangevinNoise repeats per rank).
-  [./noise_interface]
-    type = ConservedLangevinNoise
-    variable = eta
-    noise = uniform_noise
-    amplitude = $Noise
-  [../]
-
   #
   # Potential: div(sigma grad(pot)) = n*Faraday*c_s*deta/dt
   #
@@ -413,8 +471,10 @@
   solve_type = 'NEWTON'
   scheme = implicit-euler
 
-  petsc_options_iname = '-ksp_type -pc_type -pc_factor_mat_solver_type -snes_type'
-  petsc_options_value = 'preonly   lu        mumps                      vinewtonrsls'
+  # GMRES + additive Schwarz with LU on each rank's subdomain: at 8 ranks 40 s vs 52 s for a
+  # global MUMPS LU (20-step benchmark), and its parallel efficiency does not drop with rank count.
+  petsc_options_iname = '-ksp_type -pc_type -sub_pc_type -pc_asm_overlap -ksp_gmres_restart -snes_type'
+  petsc_options_value = 'gmres     asm      lu           2               100                vinewtonrsls'
 
   # Planar front speed v = L2o*exp(alpha*F*|POT_LEFT|/RT)*kappa/sigma: ~2e-6 m/s at -0.3 V and
   # ~2e-8 m/s at -0.1 V, so the 80 um to the stop at x = 90 takes ~40-3400 s.
@@ -483,11 +543,6 @@
 []
 
 [UserObjects]
-  [./uniform_noise]
-    type = ConservedMaskedUniformNoise
-    mask = dh/deta
-    seed = 12345
-  [../]
   [./stop_at_right]
     type = Terminator
     expression = 'tip_x >= 90'
