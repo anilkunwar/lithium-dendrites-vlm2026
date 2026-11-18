@@ -1,0 +1,6 @@
+{
+  "description": "delayed instability: the front stays uniform until at least t = 150",
+  "conditions": {
+    "onset_time": {"min": 150}
+  }
+}

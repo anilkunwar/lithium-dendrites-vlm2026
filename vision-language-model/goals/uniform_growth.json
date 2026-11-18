@@ -1,0 +1,7 @@
+{
+  "description": "flat, dense deposit that still grows: uniform front that advances at least 30% of the width",
+  "conditions": {
+    "class": {"in": ["uniform"]},
+    "front_mean": {"min": 0.3}
+  }
+}
