@@ -1,0 +1,4 @@
+torch>=2.3
+diffusers>=0.31
+numpy
+matplotlib
