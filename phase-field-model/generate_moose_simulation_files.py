@@ -9,9 +9,9 @@
 # weighted by h), so the interface is set by the double well alone, g = eta^2(1-eta)^2:
 #   sigma = sqrt(2*W*kappa)/6,  delta(10-90 %) = 2.2*sqrt(2*kappa/W)
 #   => kappa = 3*sigma*delta/2.2,  W = 13.2*sigma/delta
-# delta is drawn in elements of the fixed mesh (dx = 0.5 um): >= 5 elements resolves the tanh
-# profile, <= 10 elements (5 um) keeps it well below the 10 um initial electrode and the finger
-# spacing. kappa and W are written into the template; sigma and delta go to the JSON.
+# delta is drawn in elements of the fixed mesh (200 x 200 um, dx = 1 um): >= 5 elements resolves
+# the tanh profile, <= 10 elements (10 um) keeps it well below the 20 um initial electrode and the
+# finger spacing. kappa and W are written into the template; sigma and delta go to the JSON.
 #
 # Interface mobility: the Butler-Volmer rate grows as exp(alpha*F*|POT_LEFT|/RT), ~870x from
 # -0.1 to -0.45 V, while the Allen-Cahn restoring rate L1*W does not depend on the potential. L1o
@@ -33,7 +33,7 @@ TEMPLATE_FILE = "template.i"
 OUTPUT_DIR = Path("MooseProject/generated_inputs")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-DX = 0.5e-6                       # m, element size of the template mesh (100 um / 200)
+DX = 1.0e-6                       # m, element size of the template mesh (200 um / 200)
 
 # param range -> (min, max)
 # Noise scales a frozen random field xi in [-1, 1] on the Butler-Volmer rate, L2*(1 + Noise*xi);

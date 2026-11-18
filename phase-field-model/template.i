@@ -28,15 +28,15 @@
 # ---------------------------------------------------------------------------
 
 [Mesh]
-  # fixed mesh, dx = 0.5 um
+  # fixed mesh, 200 x 200 um, dx = 1 um
   type = GeneratedMesh
   dim = 2
   nx = 200
   ny = 200
   xmin = 0
-  xmax = 100
+  xmax = 200
   ymin = 0
-  ymax = 100
+  ymax = 200
   elem_type = QUAD4
 []
 
@@ -112,13 +112,13 @@
 []
 
 [Functions]
-  # Equilibrium interface at x = 10. A sharp step relaxes toward this width, and every change of
+  # Equilibrium interface at x = 20. A sharp step relaxes toward this width, and every change of
   # eta must be absorbed by c with factor c_s/c_0 = 77, so c hits its bounds and the Newton
-  # solve fails. eta = 0.5*(1-tanh((x-10)/(2*l))), l = sqrt(kappa/(2*W)) (in um), whose
+  # solve fails. eta = 0.5*(1-tanh((x-20)/(2*l))), l = sqrt(kappa/(2*W)) (in um), whose
   # 0.1-0.9 width is 4.39*l = delta.
   [./eta_ic]
     type = ParsedFunction
-    expression = '0.5*(1-tanh((x-10)/(2e6*sqrt(kappa/(2*W)))))'
+    expression = '0.5*(1-tanh((x-20)/(2e6*sqrt(kappa/(2*W)))))'
     symbol_names = 'kappa W'
     symbol_values = '$kappa $W'
   [../]
@@ -178,13 +178,13 @@
   # every material property is written to the exodus file (elemental averages)
   [./scale]
     type = GenericConstantMaterial
-    outputs = exodus
+    outputs = exodus_materials
     prop_names = 'length_scale energy_scale time_scale'
     prop_values = '1e6 6.24150943e18 1e3'
   [../]
   [./constants]
     type = GenericConstantMaterial
-    outputs = exodus
+    outputs = exodus_materials
     prop_names  = 'c_s c_0 valency molar_vol Faraday RT alpha'
     prop_values = '7.69e4 1e3 1 2.2e-5 96485 2494.2 0.5'
   [../]
@@ -201,7 +201,7 @@
   # S1o, S2o: conductivity of Li metal / electrolyte (S/m)
   [./system_constants]
     type = GenericConstantMaterial
-    outputs = exodus
+    outputs = exodus_materials
     prop_names  = 'De Dl L1o L2o S1o S2o'
     # Dl = 1e-9 (upper end of liquid electrolytes, 1e-10 to 1e-9): 3e-10 could not resupply the
     # metal side of the moving interface, and the c >= 0 bound created ~5 % of the deposit.
@@ -212,7 +212,7 @@
   # from the overpotential (Butler-Volmer).
   [./thermo_constants]
     type = GenericConstantMaterial
-    outputs = exodus
+    outputs = exodus_materials
     prop_names  = 'ko Wo'
     prop_values = '$kappa $W'
   [../]
@@ -220,28 +220,28 @@
   # ---- derived parameters (converted to model units) ----
   [./L1]
     type = ParsedMaterial
-    outputs = exodus
+    outputs = exodus_materials
     expression = '((length_scale)^3/(energy_scale*time_scale))*L1o'
     property_name = L1
     material_property_names = 'L1o length_scale energy_scale time_scale'
   [../]
   [./L2]
     type = ParsedMaterial
-    outputs = exodus
+    outputs = exodus_materials
     expression = 'L2o/time_scale'
     property_name = L2
     material_property_names = 'L2o time_scale'
   [../]
   [./kappa_isotropy]
     type = ParsedMaterial
-    outputs = exodus
+    outputs = exodus_materials
     property_name = kappa
     expression = '(energy_scale/length_scale)*ko'
     material_property_names = 'ko length_scale energy_scale'
   [../]
   [./barrier_height]
     type = ParsedMaterial
-    outputs = exodus
+    outputs = exodus_materials
     property_name = W
     expression = '(energy_scale/(length_scale)^3)*Wo'
     material_property_names = 'Wo length_scale energy_scale'
@@ -250,14 +250,14 @@
   # h(eta)
   [./h]
     type = SwitchingFunctionMaterial
-    outputs = exodus
+    outputs = exodus_materials
     h_order = HIGH
     eta = eta
   [../]
   # g(eta)
   [./g]
     type = BarrierFunctionMaterial
-    outputs = exodus
+    outputs = exodus_materials
     g_order = SIMPLE
     eta = eta
   [../]
@@ -266,7 +266,7 @@
   # ideal solution of Li+ (reference c = 1); plog regularizes ln(c) below c = 1e-6
   [./fl]
     type = DerivativeParsedMaterial
-    outputs = exodus
+    outputs = exodus_materials
     property_name = fl
     material_property_names = 'c_0 RT length_scale energy_scale'
     coupled_variables = 'c'
@@ -275,7 +275,7 @@
   [../]
   [./free_energy]
     type = DerivativeParsedMaterial
-    outputs = exodus
+    outputs = exodus_materials
     property_name = F
     coupled_variables = 'c eta'
     material_property_names = 'fl(c) g(eta) W'
@@ -289,7 +289,7 @@
   # clipping). Here every eta change still comes with the c factor of the cathodic term.
   [./Butlervolmer]
     type = DerivativeParsedMaterial
-    outputs = exodus
+    outputs = exodus_materials
     constant_names = 'A_noise'
     constant_expressions = '$Noise'
     expression = 'L2*(1+A_noise*xi)*dh*(exp(pot*(1-alpha)*Faraday*valency/RT)-c*exp(-pot*alpha*Faraday*valency/RT))'
@@ -305,7 +305,7 @@
   # deposit at -0.35 V; linear in eta it is still 0.05*Dl there and De in the bulk metal.
   [./D]
     type = DerivativeParsedMaterial
-    outputs = exodus
+    outputs = exodus_materials
     expression = '(length_scale)^2/time_scale*(De*eta+Dl*(1-eta))'
     coupled_variables = 'eta'
     property_name = D
@@ -315,7 +315,7 @@
   # M = D*c/(RT*c_0) (m^5/(J s)), converted to um^5/(eV ms) so that div(M grad(dF/dc)) is in 1/ms
   [./M]
     type = DerivativeParsedMaterial
-    outputs = exodus
+    outputs = exodus_materials
     expression = 'D*c/(RT*c_0)*(length_scale)^3/energy_scale'
     coupled_variables = 'c eta'
     property_name = M
@@ -325,7 +325,7 @@
   # electromigration coefficient D*c*n*Faraday/RT (um^2/(ms V))
   [./Deffe]
     type = DerivativeParsedMaterial
-    outputs = exodus
+    outputs = exodus_materials
     expression = 'D*c*valency*Faraday/RT'
     coupled_variables = 'eta c'
     property_name = Deffe
@@ -334,7 +334,7 @@
   [../]
   [./coupled_eta_function]
     type = ParsedMaterial
-    outputs = exodus
+    outputs = exodus_materials
     expression = 'c_s/c_0'  # normalize
     property_name = ft
     material_property_names = 'c_s c_0'
@@ -350,7 +350,7 @@
   #   The geometric mean is ~3e3 S/m at h = 0.5 and ~1.6 S/m at h = 0.02, avoiding both.
   [./ElecEff]
     type = DerivativeParsedMaterial
-    outputs = exodus
+    outputs = exodus_materials
     expression = 'exp(h*log(S1o)+(1-h)*log(S2o))/length_scale'
     coupled_variables = 'eta'
     property_name = ElecEff
@@ -360,7 +360,7 @@
   # n*Faraday*c_s in C/um^3; time_scale converts deta/dt from 1/ms to 1/s
   [./ChargeEff]
     type = ParsedMaterial
-    outputs = exodus
+    outputs = exodus_materials
     expression = 'valency*Faraday*c_s/(length_scale^3)*time_scale'
     property_name = ChargeEff
     material_property_names = 'valency Faraday length_scale c_s time_scale'
@@ -369,7 +369,7 @@
   # Li inventory density c + (c_s/c_0)*eta for the conservation check
   [./li_total_density]
     type = ParsedMaterial
-    outputs = exodus
+    outputs = exodus_materials
     property_name = li_total_density
     expression = 'c+ft*eta'
     material_property_names = 'ft'
@@ -476,11 +476,11 @@
   petsc_options_iname = '-ksp_type -pc_type -sub_pc_type -pc_asm_overlap -ksp_gmres_restart -snes_type'
   petsc_options_value = 'gmres     asm      lu           2               100                vinewtonrsls'
 
-  # Front speed ~0.03 um/s at -0.1 V up to ~20 um/s (finger tips) at -0.45 V: the run to the stop
-  # at x = 90 takes from a few s to ~1 h of model time. dtmax = 1000 ms keeps the slow (low
-  # potential) cases to a few thousand steps; IterationAdaptiveDT cuts dt where Newton struggles.
-  dtmax = 1000
-  end_time = 4E6
+  # The runs reach the stop at x = 90 within ~100 s of model time; dtmax = 100 ms gives >= ~1000
+  # steps per run (front moves <~2 um per step at the fastest tips, ~20 um/s at -0.45 V).
+  # IterationAdaptiveDT cuts dt where Newton struggles.
+  dtmax = 100
+  end_time = 1E6
 
   [./TimeStepper]
     type = IterationAdaptiveDT
@@ -545,19 +545,30 @@
 [UserObjects]
   [./stop_at_right]
     type = Terminator
-    expression = 'tip_x >= 90'
+    expression = 'tip_x >= 180'
     fail_mode = HARD
     error_level = INFO
-    message = 'Nodal eta>=0.5 tip is within 10 units of x=100.'
+    message = 'Nodal eta>=0.5 tip is within 20 units of x=200.'
     execute_on = TIMESTEP_END
     execution_order_group = 1
   [../]
   [./stop_at_left]
     type = Terminator
-    expression = 'tip_x <= 5'
+    expression = 'tip_x <= 10'
     fail_mode = HARD
     error_level = INFO
-    message = 'Nodal eta>=0.5 tip has retreated to x<=5, or the solid phase has disappeared.'
+    message = 'Nodal eta>=0.5 tip has retreated to x<=10, or the solid phase has disappeared.'
+    execute_on = TIMESTEP_END
+    execution_order_group = 1
+  [../]
+  # A run whose Li balance is off by more than 5 % is not usable: stop it as an error
+  # (nonzero exit status, flagged by batch.sh).
+  [./stop_li_balance]
+    type = Terminator
+    expression = 'li_balance_error > 0.05'
+    fail_mode = HARD
+    error_level = ERROR
+    message = 'Li balance error exceeded 5 %.'
     execute_on = TIMESTEP_END
     execution_order_group = 1
   [../]
@@ -565,15 +576,21 @@
 
 [Outputs]
   file_base = results/$CASE/$CASE
-  # write every 10th time step
+  # fields (eta, c, pot and aux variables) at every time step, ~2 MB per frame
   [./exodus]
     type = Exodus
+    execute_on = 'INITIAL TIMESTEP_END FINAL'
+  [../]
+  # material properties (~20 MB per frame) at every 10th time step, in <case>_materials.e
+  [./exodus_materials]
+    type = Exodus
+    file_base = results/$CASE/$CASE_materials
     time_step_interval = 10
+    hide = 'eta c pot bounds_dummy xi tip_coordinate c_residual'
     execute_on = 'INITIAL TIMESTEP_END FINAL'
   [../]
   [./monitor]
     type = CSV
-    time_step_interval = 10
     execute_on = 'INITIAL TIMESTEP_END FINAL'
   [../]
 []
