@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import matplotlib
 import torch
+from matplotlib import cm
 
 _JET = None
 
@@ -15,8 +16,7 @@ def jet_to_value(rgb, levels=256):
         try:
             cmap = matplotlib.colormaps["jet"]
         except AttributeError:  # matplotlib < 3.5
-            import matplotlib.cm
-            cmap = matplotlib.cm.get_cmap("jet")
+            cmap = cm.get_cmap("jet")
         _JET = torch.tensor(cmap(torch.linspace(0, 1, levels).numpy())[:, :3], dtype=torch.float32)
     jet = _JET.to(rgb.device)
     B, _, H, W = rgb.shape
